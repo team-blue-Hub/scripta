@@ -1,0 +1,46 @@
+{
+  "name": "scripta-plugin",
+  "owner": {
+    "name": "team.blue Hub"
+  },
+  "metadata": {
+    "description": "The team second brain, as a plugin. Turns meetings and scattered sources into reviewable PRs against the team handbook repo (convention: <team>-scripta-handbook). Per-user: runs on YOUR connectors, your access — output converges in the shared decision log."
+  },
+  "plugins": [
+    {
+      "name": "scripta",
+      "source": "./",
+      "strict": false,
+      "description": "Meeting digestion + freshness curation + expert hardening for the team source of truth: /daily-digest turns a transcript into digest + draft decision PRs, (opt-in) task drafts and a status lane that consolidates shipped work into project pages and refreshes status.md whenever the Linear connector is reachable, and a weekly lane (on by default for the Hub's handbook, a setting elsewhere) that adds each meeting's confirmed finished work to the week's weekly-update draft PR; /curate runs the OKM freshness lint plus a loud reference-reachability check (a cited reference the runner cannot read fails the run, with an allowlist for expected-unreachable targets) and turns confirmed rot into owner-nudge PRs; /hardening-interview asks each expert 'is this still true?' about their own pages and turns answers into a draft PR; /document saves a verified fact from any chat into the handbook as a small PR; /deep-plan enforces the plan-clear-execute flow; /compound sweeps a finished session for everything worth saving (document's sweep mode as a menu item); /catch-up briefs a returner on the decisions and changes they missed (read-only); /setup gets a member's Claude Code fully wired to the handbook (clone, folder config, auto-update repair, hook verify), and starts a new, empty handbook for a team that has none; /weekly-update builds one week's entry for the whole Hub from the blocks the digests collected, reading the dailies only where a block is missing, in a draft PR the PMs confirm before it publishes. Human merges everything.",
+      "version": "0.16.0",
+      "author": {
+        "name": "team.blue Hub"
+      },
+      "skills": [
+        "./skills/daily-digest",
+        "./skills/curate",
+        "./skills/hardening-interview",
+        "./skills/setup",
+        "./skills/document",
+        "./skills/deep-plan",
+        "./skills/catch-up",
+        "./skills/compound",
+        "./skills/weekly-update",
+        "./skills/writing"
+      ]
+    },
+    {
+      "name": "prototype",
+      "source": "./plugins/prototype",
+      "strict": false,
+      "description": "One command from idea to shareable page: /prototype builds a described idea, design or dashboard as a self-contained web page, opens a PR to the team's prototypes repo (TB_PROTOTYPES_REPO, set per team), and returns an unguessable GitHub Pages URL. Prototypes are one kind of page it builds; dashboards, screens and report mocks are equally in scope. It routes on whether the page needs a durable linkable URL, not on whether it is product-shaped: product-shaped pages get the live assets, design pages get the team's design reference and shared tokens, genuinely throwaway pages route to Claude artifacts instead. The prototypes repo is the default destination, not the only one: a user who asks for the page in their own working directory gets it there, styled the same way, with no repo and no PR. Generic, no team-specific wiring; when the target repo isn't configured, uses the one `<org>/prototypes` among the user's orgs with Pages on `main` and push access for that run, else asks and stops.",
+      "version": "0.4.0",
+      "author": {
+        "name": "team.blue Hub"
+      },
+      "skills": [
+        "./skills/prototype"
+      ]
+    }
+  ]
+}

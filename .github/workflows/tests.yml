@@ -1,0 +1,55 @@
+name: Tests
+
+# The hooks had tests and nothing ran them. This runs them on every pull
+# request, then runs the shared maps-budget action against a small fixture so
+# a change that breaks the action itself fails here, not in the handbook.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  hooks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Hook tests
+        working-directory: hooks
+        run: python3 -m unittest -v test_load_scripta_context test_load_scripta_on_prompt
+      - name: A small handbook for the action
+        run: |
+          mkdir -p "$RUNNER_TEMP/handbook"
+          printf '# Index\n' > "$RUNNER_TEMP/handbook/index.md"
+          printf '| The fact | Home |\n|---|---|\n| A fact | [`a.md`](a.md) |\n' > "$RUNNER_TEMP/handbook/where-truth-lives.md"
+      - name: The maps-budget action passes on it
+        uses: ./.github/actions/maps-budget
+        with:
+          handbook: ${{ runner.temp }}/handbook
+      - name: Setup tests
+        working-directory: skills/setup/scripts
+        run: python3 -m unittest -v test_handbook_files
+      - name: A new handbook from setup's template
+        run: python3 skills/setup/scripts/handbook_files.py create "$RUNNER_TEMP/new-handbook" --team "Test team" --owner "Test Owner (@test)"
+      - name: The maps-budget action passes on the new handbook
+        uses: ./.github/actions/maps-budget
+        with:
+          handbook: ${{ runner.temp }}/new-handbook
+
+  # The noon schedule runs under the Macs' system python3, which is 3.9, so
+  # its tests run on 3.9 too: code that 3.9 cannot run fails here, not at noon.
+  digest-schedule:
+    runs-on: ubuntu-latest
+    container: python:3.9-slim
+    steps:
+      - uses: actions/checkout@v4
+      - name: Noon schedule tests
+        working-directory: skills/daily-digest/scripts
+        run: python3 -m unittest -v test_digest_schedule
+      # setup runs under the same system python3 on a Mac.
+      - name: Setup tests on 3.9
+        working-directory: skills/setup/scripts
+        run: python3 -m unittest -v test_handbook_files

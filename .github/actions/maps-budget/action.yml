@@ -1,0 +1,19 @@
+name: Handbook maps budget
+description: >-
+  Fails when the handbook maps (index.md and where-truth-lives.md) no longer
+  reach a session whole. It runs scripta's own payload builder, the same code
+  the prompt hook uses, so there is no second copy of the shortening rules to
+  drift from. Used by the handbook's CI; needs this repo's Actions access set
+  to the organization.
+inputs:
+  handbook:
+    description: Path to the handbook checkout.
+    default: "."
+runs:
+  using: composite
+  steps:
+    - name: The maps reach a session whole
+      shell: bash
+      env:
+        HANDBOOK: ${{ inputs.handbook }}
+      run: python3 "$GITHUB_ACTION_PATH/../../../hooks/load_scripta_context.py" --check-maps "$HANDBOOK"

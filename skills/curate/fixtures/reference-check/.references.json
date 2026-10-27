@@ -1,0 +1,6 @@
+{
+  "allowlist": [
+    {"match": "example.zenlytic.com", "class": "sso", "reason": "SSO dashboard; machine probe sees only the login page.", "owner": "fixture"}
+  ],
+  "hostClasses": {}
+}

@@ -1,0 +1,11 @@
+{
+  "extraKnownMarketplaces": {
+    "scripta-plugin": {
+      "source": { "source": "github", "repo": "team-blue-Hub/scripta" },
+      "autoUpdate": true
+    }
+  },
+  "enabledPlugins": {
+    "scripta@scripta-plugin": true
+  }
+}
