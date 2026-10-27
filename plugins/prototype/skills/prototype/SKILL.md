@@ -1,14 +1,19 @@
 ---
 name: prototype
-description: One command from idea to shareable page. Turns a described idea, design or dashboard into a self-contained web page, opened as a PR to the team's prototypes repo and served at an unguessable GitHub Pages URL, or built where the user is already working when they ask for that. Use when the user says "/prototype", "prototype this", "make this clickable", "mock this up as a page", or asks for a dashboard, screen, report or design page the team will review and link to. A genuinely throwaway page nobody links to afterwards is better served as a Claude artifact, no repo needed.
+description: One command from idea to shareable page. Turns a described idea, design or dashboard into a self-contained web page, opens it as a local preview to review and iterate on, and only when the user asks publishes it as a PR to the team's prototypes repo, served at an unguessable GitHub Pages URL, or builds it where the user is already working when they ask for that. Use when the user says "/prototype", "prototype this", "make this clickable", "mock this up as a page", or asks for a dashboard, screen, report or design page the team will review and link to. A genuinely throwaway page nobody links to afterwards is better served as a Claude artifact, no repo needed.
 ---
 
 # prototype
 
-Idea in, URL out. The user describes a thing; this skill builds it as one
-self-contained web page, lands it in the team's **prototypes repo** via PR, and
-hands back a GitHub Pages link. What it builds are sketches, not products: no
-build step, no framework, no production code.
+Idea in, preview first, URL when asked. The user describes a thing; this skill
+builds it as one self-contained web page and opens it locally for them to look
+at and iterate on. Only when they ask does it land the page in the team's
+**prototypes repo** via PR and hand back a GitHub Pages link. What it builds
+are sketches, not products: no build step, no framework, no production code.
+
+Publishing waits for the ask because a first draft is rarely worth sharing:
+when every quick test became a PR, pages still being iterated on sat as open
+PRs in the prototypes repo.
 
 That is the default, not the only destination. A user who wants the page in
 their own working directory gets it there, styled the same way, with no repo
@@ -63,6 +68,11 @@ That is not what this skill is gated on.
 Skip this step entirely when Step 0 routed to build-in-place. There is no repo
 to resolve: the page belongs to the user, at the path they named.
 
+**Run it only when the user asks to publish (Step 3).** Building and previewing
+need no repo, so a page that is never published never resolves one. It sits
+here, before the build, because it decides where a published page goes; it
+does not run first.
+
 The target repo comes from the env var **`TB_PROTOTYPES_REPO`** (`org/name`,
 e.g. `team-blue-Hub/prototypes`). Teams set it once in a shared
 `.claude/settings.json` (`"env"` block); individuals can set it in
@@ -76,10 +86,10 @@ e.g. `team-blue-Hub/prototypes`). Teams set it once in a shared
   a fork or a personal account cannot win. A candidate qualifies only when
   both hold:
   - `gh api repos/<org>/prototypes/pages` returns 200 with `source.branch`
-    `main` and `source.path` `/`. Step 3 merges to `main`, so a site served
+    `main` and `source.path` `/`. Step 4 merges to `main`, so a site served
     from `gh-pages` or a workflow would 404 the link.
   - `gh api repos/<org>/prototypes --jq .permissions.push` is `true`, so a
-    read-only repo fails here and not at Step 3.
+    read-only repo fails here and not at Step 4.
 
   Exactly one qualifies → treat it as `TB_PROTOTYPES_REPO` for the rest of
   this run, say so in one line with the settings snippet that pins it, and
@@ -107,6 +117,11 @@ e.g. `team-blue-Hub/prototypes`). Teams set it once in a shared
 2. One folder per page, named **unguessably**: `<slug>-<random>` where
    `<random>` is 12+ hex chars (`openssl rand -hex 6`). The public URL is only
    as private as its path — a guessable name defeats the whole arrangement.
+   The random name is only for pages headed to the prototypes repo; a
+   build-in-place page goes at the path the user named. Name it now, before
+   the preview, and keep the name when it is published: the preview folder is
+   the folder that ships. Build it under
+   `~/.claude/.tb-prototypes/previews/<folder>/`.
 3. The folder holds a single **self-contained `index.html`** — inline CSS and
    JS, no CDN libraries, no build step. Assets it truly needs sit beside it in
    the same folder. Keep it responsive; it will be opened from a phone.
@@ -133,17 +148,43 @@ e.g. `team-blue-Hub/prototypes`). Teams set it once in a shared
    "sample data" marker, so a screenshot of it can't be mistaken for a real
    readout.
 
-## Step 3 — ship it as a PR
+## Step 3 — preview locally, publish only when asked
+
+1. Open the page for the user: `open <folder>/index.html` on macOS,
+   `xdg-open` on Linux, `start` on Windows. Also give its `file://` link with
+   the full absolute path, which is the fallback when the opener fails.
+2. When the page loads remote scripts that refuse `file://` (the live widget
+   loader, module scripts, `fetch`), serve the folder instead and open that:
+   `python3 -u -m http.server 0 --bind 127.0.0.1 --directory <folder>`. Port
+   `0` makes the OS pick a free port, which the server prints ("Serving HTTP
+   on 127.0.0.1 port <port>"), so two sessions never share one. Binding to
+   `127.0.0.1` keeps the draft off the network. Keep the server running until
+   the user publishes or moves on, then stop it.
+3. Iterate here. "Change the button", "make it dark" → edit the same preview
+   folder and reopen it. Nothing is cloned, branched, committed or pushed
+   while the page is a preview.
+4. Publish only when the user asks: "publish it", "open the PR", "give me the
+   link", "share it". When the original request explicitly asked for the link,
+   the PR, to publish or to share, that is the ask: open the preview, then
+   publish in the same run without waiting. Asking for a page "for the team to
+   review" is not an explicit ask. Otherwise, for a page headed for the
+   prototypes repo, end the preview turn by saying the page is not published
+   yet and that asking to publish ships it. A build-in-place page says where
+   the file is and nothing about publishing (Step 4).
+
+## Step 4 — ship it as a PR
 
 **Build-in-place stops before this step.** Write the page at the path the user
-named, tell them where it is, and stop. Never clone, never branch, never
-commit, never push, and never open a PR in a repo of theirs: what they do with
-the file is theirs to decide. If they later want the durable URL after all, the
-page is one copy away from the normal flow.
+named, open the preview (Step 3), tell them where it is, and stop. Never
+clone, never branch, never commit, never push, and never open a PR in a repo of
+theirs: what they do with the file is theirs to decide. If they later want the
+durable URL after all, the page is one copy away from the normal flow.
 
-1. Clone or pull the prototypes repo into `~/.claude/.tb-prototypes/<name>`
-   (shallow clone is fine; this cache dir is the skill's only workspace).
-2. Branch (`prototype/<slug>`), add the folder, commit (`prototype: <slug>`),
+1. Resolve the repo (Step 1). Clone or pull it into
+   `~/.claude/.tb-prototypes/<name>` (shallow clone is fine; this cache dir,
+   previews included, is the skill's only workspace).
+2. Copy the preview folder into the clone unchanged, under its existing name.
+   Branch (`prototype/<slug>`), add the folder, commit (`prototype: <slug>`),
    push the branch, open a PR with a one-paragraph body: what the page is for
    and the Pages URL it will get. The PR is the share point and the paper
    trail; merging is one click by any teammate (or the runner, since these are
@@ -154,15 +195,21 @@ page is one copy away from the normal flow.
      `https://<org>.github.io/<name>/<folder>/`
    - that Pages takes a minute or two after merge before the URL is live.
 
-## Step 4 — iterate in place
+## Step 5 — iterate in place
 
-"Change the button", "make it dark" → edit the SAME folder (new PR or push to
-the open one); the URL stays stable. A build-in-place page is edited in place
-the same way, at the path it already has. A genuinely different idea gets a new
-folder. Never edit someone else's folder unless the user explicitly asks.
+After publishing, "change the button", "make it dark" → edit the SAME folder in
+the clone (new PR or push to the open one), not the old preview folder, which
+is no longer the copy to edit; the URL stays stable. Preview the edit from the
+clone before pushing it, as in Step 3. A build-in-place page is edited in
+place the same way, at the path it already has. A genuinely different idea
+gets a new folder. Never edit someone else's folder unless the user
+explicitly asks.
 
 ## Guardrails
 
+- **Nothing is published before the user asks.** No clone, branch, commit,
+  push or PR until they ask to publish, up front or after the preview
+  (Step 3).
 - The ONLY repo this skill ever writes to is `TB_PROTOTYPES_REPO`, or the one
   repo Step 1 discovered for this run. Unset → try that discovery first,
   and never write a settings file; still unresolved, or

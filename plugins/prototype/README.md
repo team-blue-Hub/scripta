@@ -1,8 +1,9 @@
 # prototype
 
 One command from idea to shareable page. `/prototype` builds a described idea as a
-self-contained web page, opens a PR to your team's prototypes repo, and hands back an
-unguessable GitHub Pages URL.
+self-contained web page and opens it locally, so you can look at it and ask for changes.
+When you say "publish it", it opens a PR to your team's prototypes repo and hands back an
+unguessable GitHub Pages URL. Nothing reaches the repo before that.
 
 Prototypes are one kind of page it builds. Dashboards, screens, report mocks and other
 design pages are equally in scope: the skill routes on whether the page needs a durable,
@@ -39,7 +40,7 @@ other installed plugin from then on.
 
 ## First run
 
-The first time you run `/prototype`, it looks for your team's prototypes repo (the
+The first time you publish with `/prototype`, it looks for your team's prototypes repo (the
 `TB_PROTOTYPES_REPO` env var, `org/name`). If it isn't set, it checks
 `<org>/prototypes` in each GitHub org you belong to. If exactly one exists with
 GitHub Pages served from `main` and you can push to it, that run uses it and tells
