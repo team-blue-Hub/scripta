@@ -155,4 +155,4 @@ when set, wins over it.
 - **New versions do not arrive.** Check the auto-update setting in step 1, or run
   `/plugin update scripta@scripta-plugin`.
 - **The digest cannot find your meeting.** Paste the transcript or give it the file. For
-  Zoom problems, see the [README](../README.md).
+  Zoom problems, see [Zoom troubleshooting](reference.md#zoom-troubleshooting-read-before-your-first-digest).
