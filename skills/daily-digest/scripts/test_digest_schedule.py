@@ -4,7 +4,7 @@
 Stdlib unittest only. Every outside call goes through the seam in
 digest_schedule (run_cmd, which_on, clock, stdin_is_tty, ask); here a fake
 `World` replaces it, so nothing reaches the real launchd, Terminal, git remote
-or GitHub, and each test runs under its own temp HOME. The one place real
+or GitHub, and each test runs under its own temp home folder (see home_env). The one place real
 processes run is on purpose: the loader string and the window command are
 executed with `python3 -c` and `sh -c` against fake tools in a temp folder.
 
@@ -207,6 +207,16 @@ class World(object):
 
 
 
+def home_env(path):
+    """The env that points the home folder at path, on every OS.
+
+    Path.home() reads HOME on macOS and Linux but USERPROFILE on Windows, so a
+    test that set HOME alone wrote state.json and window-*.command files into
+    the real home folder of whoever ran the suite on Windows.
+    """
+    return {"HOME": str(path), "USERPROFILE": str(path)}
+
+
 class Base(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -214,12 +224,14 @@ class Base(unittest.TestCase):
         self.home = Path(self.tmp.name).resolve() / "home"
         self.home.mkdir()
         self.world = World(self.home)
-        env = {"HOME": str(self.home), "PATH": "/fake/bin:/usr/bin"}
+        env = {**home_env(self.home), "PATH": "/fake/bin:/usr/bin"}
         p = mock.patch.dict(os.environ, env)
         p.start()
         self.addCleanup(p.stop)
         for k in ("SCRIPTA_HANDBOOK_PATH", "CLAUDE_CONFIG_DIR"):
             os.environ.pop(k, None)
+        # Fail here, before any write, if the temp home did not take on this OS.
+        self.assertEqual(ds.home(), self.home, "the tests would write into the real home folder")
         for name, fn in (("run_cmd", self.world.run_cmd), ("which_on", self.world.which_on),
                          ("stdin_is_tty", lambda: False),
                          ("clock", lambda: dt.datetime(2026, 10, 14, 12, 0))):
@@ -577,7 +589,7 @@ class Window(Base):
                           'printf %s "${CLAUDE_CONFIG_DIR-unset}" > "$REC.cfg"\n')
         claude.chmod(0o755)
         rec = str(Path(out_dir) / "rec")
-        env = {"PATH": "%s:/usr/bin:/bin" % fake, "REC": rec, "HOME": str(self.home)}
+        env = {"PATH": "%s:/usr/bin:/bin" % fake, "REC": rec, **home_env(self.home)}
         subprocess.run(["sh", "-c", cmd], env=env, check=True)
         return (Path(rec + ".cwd").read_text().strip(), Path(rec + ".arg").read_text(),
                 Path(rec + ".cfg").read_text())
@@ -1160,7 +1172,7 @@ class HandbookParity(unittest.TestCase):
         for setup in self.scenarios():
             with self.subTest(setup.__name__), tempfile.TemporaryDirectory() as t:
                 home = Path(t).resolve()
-                env = {"HOME": str(home)}
+                env = home_env(home)
                 setup(home, env)
                 with mock.patch.dict(os.environ, env), \
                         mock.patch.object(hook, "CONFIG_FILE", home / ".config" / "scripta" / "config.json"):
@@ -1465,10 +1477,11 @@ class WindowsLoaderBranch(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.home = Path(self.tmp.name).resolve()
-        p = mock.patch.dict(os.environ, {"HOME": str(self.home)})
+        p = mock.patch.dict(os.environ, home_env(self.home))
         p.start()
         self.addCleanup(p.stop)
         os.environ.pop("CLAUDE_CONFIG_DIR", None)
+        self.assertEqual(Path.home(), self.home, "the tests would write into the real home folder")
 
     def exec_loader(self):
         calls = []
@@ -1518,7 +1531,7 @@ class Loader(unittest.TestCase):
         osa.chmod(0o755)
         self.mark = self.root / "mark"
         self.osa_log = self.root / "osa.log"
-        self.env = {"HOME": str(self.home), "PATH": "%s:/usr/bin:/bin" % bin_dir,
+        self.env = {**home_env(self.home), "PATH": "%s:/usr/bin:/bin" % bin_dir,
                     "MARK": str(self.mark), "OSA_LOG": str(self.osa_log)}
 
     def plant(self, config_dir, version):
