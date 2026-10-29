@@ -949,6 +949,32 @@ class TestProfileAndBacktick(unittest.TestCase):
                                        "endpoint": "/users/ghostuser"})
         self.assertEqual(outcome["class"], "no-access")
 
+    def test_only_limits_findings_to_that_file(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            write(root, "a.md", "dead https://example.com/a-dead\n")
+            write(root, "sub/b.md", "dead https://example.com/b-dead\n")
+            rc.probe_http = lambda url, timeout=rc.DEFAULT_TIMEOUT, _hop=0: {"status": 404, "error": None}
+
+            code, out, err = run_main(["--path", str(root), "--only", "sub/b.md", "--json"])
+            report = json.loads(out)
+            self.assertEqual(code, 1)
+            self.assertEqual({f["file"] for f in report["findings"]}, {"sub/b.md"})
+
+    def test_only_missing_file_exits_2_with_message(self):
+        with tempfile.TemporaryDirectory() as d:
+            code, out, err = run_main(["--path", d, "--only", "nope.md"])
+            self.assertEqual(code, 2)
+            self.assertIn("--only file not found", err)
+
+    def test_only_outside_root_exits_2(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d) / "hb"
+            root.mkdir()
+            write(Path(d), "outside.md", "x\n")
+            code, out, err = run_main(["--path", str(root), "--only", "../outside.md"])
+            self.assertEqual(code, 2)
+
     def test_trailing_backtick_stripped_from_bare_url(self):
         urls = rc._extract_urls("see https://example.com/x` in code")
         self.assertEqual(urls, ["https://example.com/x"])

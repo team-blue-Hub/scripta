@@ -74,6 +74,14 @@ Two hooks work together:
   team-fact question, via a conservative trigger match checked before any file or git
   access. Everything else passes through untouched.
 
+The session-start hook also warns about dead links. When a link in `where-truth-lives.md`
+did not open for you, because it is gone or you have no access, the session gets one line
+naming it, so it says it could not read that source instead of guessing. The check runs in
+the background at most once a day (`SCRIPTA_LINK_CHECK_HOURS`, default 24), with your own
+GitHub login, so session start stays instant. The result is kept in the handbook
+checkout's `.git/`, so a checkout that is a git worktree gets no warning.
+`SCRIPTA_LINK_CHECK=0` turns it off.
+
 Handbook location defaults to `~/PROJECTS/hub-scripta-handbook`, falling back to
 `~/PROJECTS/scripta`. To point at a checkout elsewhere, set
 `"handbook_path"` in `~/.config/scripta/config.json`, or the `SCRIPTA_HANDBOOK_PATH`

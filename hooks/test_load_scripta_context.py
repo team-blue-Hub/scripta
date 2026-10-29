@@ -6,15 +6,26 @@ No framework, no fixtures — stdlib unittest only, same bar as the hook itself.
 """
 from __future__ import annotations
 
+import contextlib
+import hashlib
+import io
+import json
+import os
+import subprocess
 import sys
+import tempfile
+import time
 import unittest
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).parent))
 from load_scripta_context import (MAX_BYTES, REGISTRY_CELL_CAP, assemble_maps_payload,
                                   compact_index, compact_registry, index_pointer,
                                   registry_table_only, skeletal_index,
                                   strip_frontmatter)
+import load_scripta_context as hook
 
 
 class StripFrontmatter(unittest.TestCase):
@@ -508,6 +519,237 @@ class SkillsNameNoHubRepoOutsideTheFallbacks(unittest.TestCase):
         section = text[start:end]
         self.assertIn("`team-blue-Hub/hub-scripta-handbook`", section)
         self.assertIn("hub-scripta-handbook/blob/main/onboarding/setup.md", section)
+
+
+PAGE = "# Where\n\nhttps://github.com/a/b and https://notion.so/x and https://example.com/z\n"
+
+
+def make_repo(page: str = PAGE) -> Path:
+    d = Path(tempfile.mkdtemp())
+    (d / ".git").mkdir()
+    (d / "where-truth-lives.md").write_text(page, encoding="utf-8")
+    return d
+
+
+def write_cache(repo: Path, findings, age_h: float = 1, sha=None, status="checked") -> None:
+    when = datetime.now(timezone.utc) - timedelta(hours=age_h)
+    (repo / ".git" / "scripta-link-check.json").write_text(json.dumps({
+        "checked_at": when.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "page_sha256": sha or hashlib.sha256((repo / "where-truth-lives.md").read_bytes()).hexdigest(),
+        "status": status,
+        "findings": findings,
+    }))
+
+
+def finding(target, cls):
+    return {"target": target, "error_class": cls}
+
+
+class LinkWarning(unittest.TestCase):
+    def test_no_cache_means_no_line(self):
+        self.assertEqual(hook.link_warning(make_repo()), "")
+
+    def test_shows_no_access_and_gone(self):
+        repo = make_repo()
+        write_cache(repo, [finding("https://github.com/a/b", "no-access"),
+                           finding("https://notion.so/x", "gone")])
+        line = hook.link_warning(repo)
+        self.assertIn("did not open for you", line)
+        self.assertIn("https://github.com/a/b (no access)", line)
+        self.assertIn("https://notion.so/x (gone)", line)
+        self.assertIn("(checked %s)" % datetime.now(timezone.utc).strftime("%Y-%m-%d"), line)
+        self.assertIn("do not guess its content", line)
+
+    def test_other_classes_never_shown(self):
+        repo = make_repo()
+        write_cache(repo, [finding("https://github.com/a/b", c) for c in
+                           ("needs-agent-result", "sso-gated-no-allowlist", "unknown", "transient")])
+        self.assertEqual(hook.link_warning(repo), "")
+
+    def test_target_gone_from_page_is_dropped(self):
+        repo = make_repo()
+        write_cache(repo, [finding("https://removed.example/x", "gone"),
+                           finding("https://notion.so/x", "gone")])
+        line = hook.link_warning(repo)
+        self.assertNotIn("removed.example", line)
+        self.assertIn("https://notion.so/x", line)
+
+    def test_cap_of_five_with_more(self):
+        urls = ["https://example.com/%d" % i for i in range(8)]
+        repo = make_repo(" ".join(urls))
+        write_cache(repo, [finding(u, "gone") for u in urls])
+        line = hook.link_warning(repo)
+        self.assertIn("https://example.com/4 (gone)", line)
+        self.assertNotIn("https://example.com/5 (gone)", line)
+        self.assertIn("and 3 more", line)
+
+    def test_broken_cache_gives_empty_line(self):
+        repo = make_repo()
+        (repo / ".git" / "scripta-link-check.json").write_text("{not json")
+        self.assertEqual(hook.link_warning(repo), "")
+
+
+class MaybeRefresh(unittest.TestCase):
+    def spawn(self, repo, hours=24):
+        with mock.patch.object(hook.subprocess, "Popen") as popen:
+            hook.maybe_refresh_links(repo, hours)
+        return popen
+
+    def test_no_cache_spawns(self):
+        popen = self.spawn(make_repo())
+        popen.assert_called_once()
+        args, kw = popen.call_args
+        self.assertEqual(args[0][0], sys.executable)
+        self.assertEqual(args[0][2], "--refresh-links")
+        self.assertEqual(kw["stdin"], subprocess.DEVNULL)
+        self.assertEqual(kw["stdout"], subprocess.DEVNULL)
+        self.assertEqual(kw["stderr"], subprocess.DEVNULL)
+
+    def test_fresh_cache_spawns_nothing(self):
+        repo = make_repo()
+        write_cache(repo, [], age_h=1)
+        self.spawn(repo).assert_not_called()
+
+    def test_old_cache_spawns(self):
+        repo = make_repo()
+        write_cache(repo, [], age_h=30)
+        self.spawn(repo).assert_called_once()
+
+    def test_changed_page_spawns(self):
+        repo = make_repo()
+        write_cache(repo, [], age_h=1, sha="0" * 64)
+        self.spawn(repo).assert_called_once()
+
+    def test_young_lock_blocks_second_spawn(self):
+        repo = make_repo()
+        self.spawn(repo).assert_called_once()
+        self.spawn(repo).assert_not_called()
+
+    def test_old_lock_is_ignored(self):
+        repo = make_repo()
+        lock = repo / ".git" / "scripta-link-check.started"
+        lock.touch()
+        old = time.time() - 16 * 60
+        os.utime(lock, (old, old))
+        self.spawn(repo).assert_called_once()
+
+    def test_popen_raising_is_swallowed(self):
+        with mock.patch.object(hook.subprocess, "Popen", side_effect=OSError("no")):
+            hook.maybe_refresh_links(make_repo(), 24)
+
+    def test_posix_uses_new_session(self):
+        with mock.patch.object(hook, "_is_windows", return_value=False):
+            _, kw = self.spawn(make_repo()).call_args
+        self.assertTrue(kw["start_new_session"])
+        self.assertNotIn("creationflags", kw)
+
+    def test_windows_uses_creationflags(self):
+        with mock.patch.object(hook, "_is_windows", return_value=True):
+            _, kw = self.spawn(make_repo()).call_args
+        self.assertEqual(kw["creationflags"], 0x00000008 | 0x00000200)
+        self.assertNotIn("start_new_session", kw)
+
+
+class RefreshLinks(unittest.TestCase):
+    def cache(self, repo):
+        return json.loads((repo / ".git" / "scripta-link-check.json").read_text())
+
+    def run_refresh(self, repo, **fake):
+        with mock.patch.object(hook.subprocess, "run", **fake):
+            return hook.refresh_links(repo)
+
+    def test_findings_are_cached(self):
+        repo = make_repo()
+        out = json.dumps({"findings": [
+            {"target": "https://notion.so/x", "error_class": "no-access", "file": "w", "line": 3},
+        ]})
+        done = subprocess.CompletedProcess([], 1, stdout=out, stderr="")
+        self.assertEqual(self.run_refresh(repo, return_value=done), 0)
+        c = self.cache(repo)
+        self.assertEqual(c["status"], "checked")
+        self.assertEqual(c["findings"], [{"target": "https://notion.so/x", "error_class": "no-access"}])
+        self.assertEqual(c["page_sha256"], hashlib.sha256((repo / "where-truth-lives.md").read_bytes()).hexdigest())
+
+    def test_exit_two_writes_skipped(self):
+        repo = make_repo()
+        done = subprocess.CompletedProcess([], 2, stdout="", stderr="gh not logged in")
+        self.run_refresh(repo, return_value=done)
+        c = self.cache(repo)
+        self.assertTrue(c["status"].startswith("skipped"))
+        self.assertEqual(c["findings"], [])
+
+    def test_timeout_writes_skipped(self):
+        repo = make_repo()
+        self.run_refresh(repo, side_effect=subprocess.TimeoutExpired("x", 300))
+        self.assertTrue(self.cache(repo)["status"].startswith("skipped"))
+
+    def test_command_shape(self):
+        repo = make_repo()
+        done = subprocess.CompletedProcess([], 0, stdout='{"findings": []}', stderr="")
+        with mock.patch.object(hook.subprocess, "run", return_value=done) as run:
+            hook.refresh_links(repo)
+        cmd = run.call_args[0][0]
+        self.assertEqual(cmd[2:], ["--path", str(repo), "--only", "where-truth-lives.md", "--json"])
+        self.assertEqual(run.call_args[1]["timeout"], 300)
+
+
+class MainLinkCheck(unittest.TestCase):
+    def run_main(self, repo, env=None):
+        buf = io.StringIO()
+        full = {"SCRIPTA_HANDBOOK_PATH": str(repo), "SCRIPTA_HOOK_TTL_MIN": "100000"}
+        full.update(env or {})
+        (repo / ".git" / "scripta-hook-last-pull").touch()  # no real git pull
+        with mock.patch.dict(os.environ, full), mock.patch.object(hook.subprocess, "Popen") as popen, \
+                contextlib.redirect_stdout(buf):
+            hook.main()
+        return buf.getvalue(), popen
+
+    def test_warning_is_appended_to_output(self):
+        repo = make_repo()
+        write_cache(repo, [finding("https://notion.so/x", "gone")])
+        out, popen = self.run_main(repo)
+        text = json.loads(out)["hookSpecificOutput"]["additionalContext"]
+        self.assertIn("A team handbook exists at", text)
+        self.assertIn("https://notion.so/x (gone)", text)
+        popen.assert_not_called()
+
+    def test_off_switch_reads_and_spawns_nothing(self):
+        repo = make_repo()
+        write_cache(repo, [finding("https://notion.so/x", "gone")], age_h=99)
+        out, popen = self.run_main(repo, {"SCRIPTA_LINK_CHECK": "0"})
+        self.assertNotIn("did not open", out)
+        popen.assert_not_called()
+
+    def test_invalid_hours_falls_back_to_default(self):
+        repo = make_repo()
+        write_cache(repo, [], age_h=1)
+        _, popen = self.run_main(repo, {"SCRIPTA_LINK_CHECK_HOURS": "soon"})
+        popen.assert_not_called()
+
+    def test_popen_failure_keeps_output(self):
+        repo = make_repo()
+        buf = io.StringIO()
+        (repo / ".git" / "scripta-hook-last-pull").touch()
+        env = {"SCRIPTA_HANDBOOK_PATH": str(repo), "SCRIPTA_HOOK_TTL_MIN": "100000"}
+        with mock.patch.dict(os.environ, env), \
+                mock.patch.object(hook.subprocess, "Popen", side_effect=OSError("x")), \
+                contextlib.redirect_stdout(buf):
+            hook.main()
+        self.assertIn("A team handbook exists at", buf.getvalue())
+
+    def test_refresh_flag_prints_nothing(self):
+        repo = make_repo()
+        buf = io.StringIO()
+        done = subprocess.CompletedProcess([], 0, stdout='{"findings": []}', stderr="")
+        with mock.patch.object(hook.subprocess, "run", return_value=done), \
+                mock.patch.object(sys, "argv", ["hook", "--refresh-links", str(repo)]), \
+                contextlib.redirect_stdout(buf):
+            with self.assertRaises(SystemExit) as cm:
+                exec(compile(Path(hook.__file__).read_text(), hook.__file__, "exec"),
+                     {"__name__": "__main__", "__file__": hook.__file__})
+        self.assertEqual(cm.exception.code, 0)
+        self.assertEqual(buf.getvalue(), "")
+        self.assertTrue((repo / ".git" / "scripta-link-check.json").is_file())
 
 
 if __name__ == "__main__":

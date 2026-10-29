@@ -868,10 +868,11 @@ def extract_file_citations(path: Path, rel: str) -> tuple[list[tuple[str, int, s
     return citations, exempt_count
 
 
-def extract_citations(root: Path) -> tuple[dict[str, list[tuple[str, int]]], int]:
+def extract_citations(root: Path, only: str | None = None) -> tuple[dict[str, list[tuple[str, int]]], int]:
     by_target: dict[str, list[tuple[str, int]]] = {}
     exempt_total = 0
-    for path in sorted(root.rglob("*.md")):
+    paths = [root / only] if only else sorted(root.rglob("*.md"))
+    for path in paths:
         parts = path.relative_to(root).parts
         if any(part in SKIP_DIRS for part in parts):
             continue
@@ -961,7 +962,7 @@ def print_human_report(report: dict) -> None:
 # CLI modes
 # --------------------------------------------------------------------------
 
-def build_routings(root: Path):
+def build_routings(root: Path, only: str | None = None):
     """Load config, extract citations, and route every target - the one
     computation shared by the normal scan, --inventory, and --verify.
     This matters because --verify calls the exact same code the real scan
@@ -977,7 +978,7 @@ def build_routings(root: Path):
             connector_hosts.add(host.lower())
     allowlist = config["allowlist"]
 
-    by_target, exempt_count = extract_citations(root)
+    by_target, exempt_count = extract_citations(root, only)
     routings = {url: route_target(url, allowlist, sso_hosts, connector_hosts) for url in by_target}
     return routings, by_target, exempt_count, config_warnings, sso_hosts, connector_hosts
 
@@ -1079,6 +1080,9 @@ def main(argv: list[str]) -> int:
                           "row present, filled, and non-failing; requires --path so the "
                           "authoritative connector-only target set is recomputed from the "
                           "handbook itself, never merely trusted from the results file")
+    ap.add_argument("--only", metavar="RELPATH",
+                     help="scan only this one file (a path relative to --path); "
+                          "config still loads from the --path root")
     args = ap.parse_args(argv[1:])
 
     if not args.path:
@@ -1090,8 +1094,16 @@ def main(argv: list[str]) -> int:
         print(f"error: not a directory: {root}", file=sys.stderr)
         return 2
 
+    only = None
+    if args.only:
+        target = (root / args.only).resolve()
+        if not target.is_file() or root not in target.parents:
+            print(f"error: --only file not found under {root}: {args.only}", file=sys.stderr)
+            return 2
+        only = str(target.relative_to(root))
+
     try:
-        routings, by_target, exempt_count, config_warnings, sso_hosts, connector_hosts = build_routings(root)
+        routings, by_target, exempt_count, config_warnings, sso_hosts, connector_hosts = build_routings(root, only)
     except ConfigError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
