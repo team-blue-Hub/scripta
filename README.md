@@ -42,10 +42,7 @@ repo, and a teammate approves each one before any session reads it.
 | Face a judgment call | It comes back to you, every time | Your team's standards are written down, so fewer calls come back to you |
 
 It also compounds, because every fact one person saves makes every later session better for
-the whole team. At the [team.blue](https://team.blue) Hub, where scripta has run since July
-2026, about 20 people had opened over 550 handbook pull requests and recorded more than 360
-decisions as of October 2026, while the team grew from 9 to 19 people. It helped us double the
-productivity of our development team.
+the whole team.
 
 ## How it works
 
@@ -214,7 +211,8 @@ scripta is built by the Hub team at [team.blue](https://team.blue), a European g
 digital-services brands for small businesses, from hosting and domains to website builders
 and compliance. The Hub is building one place where those businesses can create and run
 their business online, across the group's brands, and scripta is how the team keeps its own
-knowledge straight while it does.
+knowledge straight while it does. Since we started using it, scripta has helped us double the
+productivity of the team.
 
 ## Contributing
 
