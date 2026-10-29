@@ -57,19 +57,38 @@ Config (env, all optional):
 
 Freshness: a git pull runs at most once per TTL window (marker file in .git/).
 A failed pull is swallowed — slightly stale truth beats a blocked session start.
+
+Link warning: the links in where-truth-lives.md can be dead, or ones this person
+cannot open, and a session that follows them gets nothing back and says nothing.
+So the hook adds one line naming the links that did not open for this person.
+It never does the check itself (no network at session start). It reads a cache in
+.git/ and, when the cache is stale, starts the checker in a detached background
+process, at most once per window, with the person's own `gh` login. The warning
+never blocks anything.
+    SCRIPTA_LINK_CHECK=0        turn the feature off (no read, no refresh)
+    SCRIPTA_LINK_CHECK_HOURS    hours between checks (default: 24)
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
 import subprocess
 import sys
+import tempfile
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 MAP_PAGES = ("index.md", "where-truth-lives.md")
+LINKS_PAGE = MAP_PAGES[1]
 PULL_MARKER = "scripta-hook-last-pull"
+LINK_CACHE = "scripta-link-check.json"
+LINK_LOCK = "scripta-link-check.started"
+LINK_LOCK_MIN = 15  # a refresh that died leaves its lock behind; ignore it after this
+LINK_SHOWN_CAP = 5
+LINK_WARN_CLASSES = {"no-access": "no access", "gone": "gone"}
 CONFIG_FILE = Path.home() / ".config" / "scripta" / "config.json"
 
 # Claude Code offloads hook output near 10KB; stay clearly under so the whole
@@ -288,6 +307,140 @@ def freshen(repo: Path, ttl_min: int) -> None:
             pass
 
 
+def _is_windows() -> bool:
+    return os.name == "nt"
+
+
+def _read_link_cache(repo: Path) -> dict | None:
+    try:
+        data = json.loads((repo / ".git" / LINK_CACHE).read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else None
+    except Exception:
+        return None
+
+
+def _page_sha(repo: Path) -> str | None:
+    try:
+        return hashlib.sha256((repo / LINKS_PAGE).read_bytes()).hexdigest()
+    except Exception:
+        return None
+
+
+def link_warning(repo: Path) -> str:
+    """One line naming handbook links that did not open for this person, or "".
+
+    Reads the cache only. A finding counts when it is no-access or gone and its
+    target is still on the page, so a link fixed since the check drops out.
+    """
+    try:
+        cache = _read_link_cache(repo)
+        if not cache:
+            return ""
+        page = (repo / LINKS_PAGE).read_text(encoding="utf-8")
+        seen: dict[str, str] = {}
+        for f in cache.get("findings") or []:
+            label = LINK_WARN_CLASSES.get(f.get("error_class"))
+            target = f.get("target")
+            if label and isinstance(target, str) and target in page:
+                seen.setdefault(target, label)
+        if not seen:
+            return ""
+        items = list(seen.items())
+        shown = ", ".join(f"{t} ({label})" for t, label in items[:LINK_SHOWN_CAP])
+        if len(items) > LINK_SHOWN_CAP:
+            shown += f", and {len(items) - LINK_SHOWN_CAP} more"
+        day = str(cache.get("checked_at") or "")[:10]
+        return (f"Handbook links that did not open for you (checked {day}): {shown}. "
+                "If an answer depends on one, say you could not read it; do not guess its content.")
+    except Exception:
+        return ""
+
+
+def maybe_refresh_links(repo: Path, hours: float) -> None:
+    """Start a detached background check when the cache is stale. Never waits."""
+    try:
+        cache = _read_link_cache(repo)
+        stale = True
+        if cache:
+            checked = datetime.fromisoformat(str(cache["checked_at"]).replace("Z", "+00:00"))
+            age_h = (datetime.now(timezone.utc) - checked).total_seconds() / 3600
+            stale = age_h >= hours or cache.get("page_sha256") != _page_sha(repo)
+        if not stale:
+            return
+        lock = repo / ".git" / LINK_LOCK
+        if lock.exists() and (time.time() - lock.stat().st_mtime) < LINK_LOCK_MIN * 60:
+            return
+        lock.touch()
+        kwargs: dict = {}
+        if _is_windows():
+            kwargs["creationflags"] = 0x00000008 | 0x00000200  # DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP
+        else:
+            kwargs["start_new_session"] = True
+        subprocess.Popen(
+            [sys.executable, str(Path(__file__).resolve()), "--refresh-links", str(repo)],
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            **kwargs,
+        )
+    except Exception:
+        pass  # a link check must never touch session start
+
+
+def _write_link_cache(repo: Path, sha: str | None, status: str, findings: list) -> None:
+    body = {
+        "checked_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "page_sha256": sha,
+        "status": status,
+        "findings": findings,
+    }
+    git_dir = repo / ".git"
+    fd, tmp = tempfile.mkstemp(dir=git_dir, prefix=LINK_CACHE + ".")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            json.dump(body, fh)
+        os.replace(tmp, git_dir / LINK_CACHE)
+    except Exception:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def refresh_links(repo: Path) -> int:
+    """Run the reference checker on the links page and cache what it finds.
+
+    A checker that cannot run is cached as skipped with no findings, so the
+    window is waited out instead of retried at every session start.
+    """
+    try:
+        sha = _page_sha(repo)
+        checker = (Path(__file__).resolve().parent.parent
+                   / "skills" / "curate" / "scripts" / "reference_check.py")
+        status, findings = "skipped: checker not found", []
+        if checker.is_file():
+            try:
+                run = subprocess.run(
+                    [sys.executable, str(checker), "--path", str(repo),
+                     "--only", LINKS_PAGE, "--json"],
+                    timeout=300, capture_output=True, text=True, check=False,
+                )
+                if run.returncode in (0, 1):
+                    report = json.loads(run.stdout)
+                    findings = [{"target": f["target"], "error_class": f["error_class"]}
+                                for f in report.get("findings", [])]
+                    status = "checked"
+                else:
+                    status = f"skipped: checker exited {run.returncode}"
+            except subprocess.TimeoutExpired:
+                status = "skipped: checker timed out"
+            except Exception:
+                status = "skipped: checker output unreadable"
+        _write_link_cache(repo, sha, status, findings)
+    except Exception:
+        pass
+    return 0
+
+
 def _assemble_maps(repo: Path) -> tuple[str | None, int, int]:
     """Assemble the full map-pages body: both pages, compacted, frontmatter-stripped,
     MAX_BYTES-guarded. Returns None if neither page is present.
@@ -471,9 +624,25 @@ def main() -> int:
     freshen(repo, ttl)
 
     try:
+        text = _pointer_text(repo)
+    except Exception:
+        return 0  # must never crash session start
+    if os.environ.get("SCRIPTA_LINK_CHECK") != "0":
+        try:
+            hours = float(os.environ.get("SCRIPTA_LINK_CHECK_HOURS", "24"))
+            if not hours > 0 or hours == float("inf"):
+                hours = 24.0
+        except ValueError:
+            hours = 24.0
+        maybe_refresh_links(repo, hours)
+        warning = link_warning(repo)
+        if warning:
+            text += "\n" + warning
+
+    try:
         json.dump({"hookSpecificOutput": {
             "hookEventName": "SessionStart",
-            "additionalContext": _pointer_text(repo),
+            "additionalContext": text,
         }}, sys.stdout)
     except Exception:
         return 0  # must never crash session start
@@ -481,6 +650,8 @@ def main() -> int:
 
 
 if __name__ == "__main__":
+    if len(sys.argv) >= 3 and sys.argv[1] == "--refresh-links":
+        raise SystemExit(refresh_links(Path(sys.argv[2])))
     if len(sys.argv) >= 2 and sys.argv[1] == "--check-maps":
         raise SystemExit(check_maps_cli(sys.argv[2] if len(sys.argv) > 2 else "."))
     raise SystemExit(main())
