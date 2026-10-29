@@ -109,8 +109,8 @@ harmless. (The commands use `python3`; on Windows you may need `python` or `py -
 ## A second plugin in this marketplace: `prototype`
 
 `/prototype` (plugin `prototype`) turns a described idea into a self-contained
-web page, opens it as a PR to your team's prototypes repo, and returns an unguessable
-GitHub Pages URL. Prototypes are one kind of page it builds; dashboards, screens and
+web page and opens it locally for you to review. When you ask to publish, it opens a PR
+to your team's prototypes repo and returns an unguessable GitHub Pages URL. Prototypes are one kind of page it builds; dashboards, screens and
 report mocks are equally in scope. It routes on whether the page needs a durable,
 linkable URL, not on whether it is product-shaped: a product-shaped page gets the live
 styles and the live widget, a design page gets the team's generated token artifact and
