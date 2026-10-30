@@ -125,6 +125,9 @@ e.g. `team-blue-Hub/prototypes`). Teams set it once in a shared
 3. The folder holds a single **self-contained `index.html`** — inline CSS and
    JS, no CDN libraries, no build step. Assets it truly needs sit beside it in
    the same folder. Keep it responsive; it will be opened from a phone.
+   A page headed for the prototypes repo carries
+   `<meta name="robots" content="noindex, nofollow">` in its `<head>`: the
+   Pages site is public, and only the folder name keeps a page unlisted.
 4. **Never invent brand styling.** Take it from the right place for the kind
    of page. This is the same wherever the page lands, and it is the whole
    value of the build-in-place route: the tokens are the point, the repo was
