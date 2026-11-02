@@ -8,6 +8,10 @@ or GitHub, and each test runs under its own temp home folder (see home_env). The
 processes run is on purpose: the loader string and the window command are
 executed with `python3 -c` and `sh -c` against fake tools in a temp folder.
 
+Each test picks its OS: Base patches is_windows() to False and Windows patches
+it to True, so a Mac test takes the Mac path even when the suite runs on
+Windows. The tests that run sh or Mac tools for real are skipped there.
+
 Run: cd skills/daily-digest/scripts && python3 -m unittest -v test_digest_schedule
 """
 from __future__ import annotations
@@ -31,6 +35,9 @@ sys.path.insert(0, str(Path(__file__).parent))
 import digest_schedule as ds  # noqa: E402
 
 HOOK = Path(__file__).resolve().parents[3] / "hooks" / "load_scripta_context.py"
+
+# For a test that runs sh, or a fake Mac tool written as a shell script.
+posix_only = unittest.skipIf(os.name == "nt", "runs sh or a shell-script tool")
 
 DAILY_SQ2 = "Hub - Daily - Sq2"
 DAILY_ALL = "Hub - Daily - All"
@@ -232,7 +239,8 @@ class Base(unittest.TestCase):
             os.environ.pop(k, None)
         # Fail here, before any write, if the temp home did not take on this OS.
         self.assertEqual(ds.home(), self.home, "the tests would write into the real home folder")
-        for name, fn in (("run_cmd", self.world.run_cmd), ("which_on", self.world.which_on),
+        for name, fn in (("is_windows", lambda: False),
+                         ("run_cmd", self.world.run_cmd), ("which_on", self.world.which_on),
                          ("stdin_is_tty", lambda: False),
                          ("clock", lambda: dt.datetime(2026, 10, 14, 12, 0))):
             q = mock.patch.object(ds, name, fn)
@@ -594,6 +602,7 @@ class Window(Base):
         return (Path(rec + ".cwd").read_text().strip(), Path(rec + ".arg").read_text(),
                 Path(rec + ".cfg").read_text())
 
+    @posix_only
     def test_a_handbook_path_with_a_space_and_a_quote_reaches_the_shell_as_one_path(self):
         weird = self.make_handbook(self.home / "PROJECTS" / "my hand's \"book\"")
         opened = self.open_with(weird)
@@ -614,6 +623,7 @@ class Window(Base):
         self.assertTrue(script.read_text(encoding="utf-8").startswith("#!/bin/bash\n"))
         self.assertFalse([a for a in self.world.osa() if any("do script" in x for x in a)])
 
+    @posix_only
     def test_a_saved_claude_config_dir_is_exported(self):
         cmd = self.script_arg(self.open_with(self.handbook, config_dir="/Users/x/claude profile"))
         _, _, cfg = self.run_in_shell(cmd, self.tmp.name)
@@ -1503,7 +1513,9 @@ class WindowsLoaderBranch(unittest.TestCase):
         f.parent.mkdir(parents=True)
         f.write_text("")
         (argv, kw), = self.exec_loader()
-        self.assertEqual(argv[1:], [str(f), "run"])
+        # The loader joins a '/' path onto the cache folder, so compare as paths.
+        self.assertEqual(Path(argv[1]), f)
+        self.assertEqual(argv[2:], ["run"])
         self.assertEqual(kw["creationflags"], 0x08000000)
         self.assertEqual(kw["stderr"], subprocess.STDOUT)
         self.assertEqual(kw["stdout"].name, str(self.home / ".scripta" / "digest-schedule" / "schedule.log"))
@@ -1556,6 +1568,7 @@ class Loader(unittest.TestCase):
         self.assertEqual(self.load(), 0)
         self.assertEqual(self.mark.read_text(), "0.13.0 run")
 
+    @posix_only
     def test_nothing_installed_notifies_and_exits_non_zero(self):
         self.assertNotEqual(self.load(), 0)
         self.assertFalse(self.mark.exists())
