@@ -78,7 +78,8 @@ The session-start hook also warns about dead links. When a link in `where-truth-
 did not open for you, because it is gone or you have no access, the session gets one line
 naming it, so it says it could not read that source instead of guessing. The check runs in
 the background at most once a day (`SCRIPTA_LINK_CHECK_HOURS`, default 24), with your own
-GitHub login, so session start stays instant. The result is kept in the handbook
+GitHub login, so session start stays instant. A check that cannot run, for example
+offline, keeps the last warning. The result is kept in the handbook
 checkout's `.git/`, so a checkout that is a git worktree gets no warning.
 `SCRIPTA_LINK_CHECK=0` turns it off.
 

@@ -349,7 +349,7 @@ def link_warning(repo: Path) -> str:
         shown = ", ".join(f"{t} ({label})" for t, label in items[:LINK_SHOWN_CAP])
         if len(items) > LINK_SHOWN_CAP:
             shown += f", and {len(items) - LINK_SHOWN_CAP} more"
-        day = str(cache.get("checked_at") or "")[:10]
+        day = str(cache.get("findings_checked_at") or cache.get("checked_at") or "")[:10]
         return (f"Handbook links that did not open for you (checked {day}): {shown}. "
                 "If an answer depends on one, say you could not read it; do not guess its content.")
     except Exception:
@@ -373,7 +373,9 @@ def maybe_refresh_links(repo: Path, hours: float) -> None:
         lock.touch()
         kwargs: dict = {}
         if _is_windows():
-            kwargs["creationflags"] = 0x00000008 | 0x00000200  # DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP
+            # CREATE_NO_WINDOW, not DETACHED_PROCESS: a detached refresher has no
+            # console, so the checker it starts would open a visible one.
+            kwargs["creationflags"] = 0x08000000 | 0x00000200  # CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP
         else:
             kwargs["start_new_session"] = True
         subprocess.Popen(
@@ -385,12 +387,15 @@ def maybe_refresh_links(repo: Path, hours: float) -> None:
         pass  # a link check must never touch session start
 
 
-def _write_link_cache(repo: Path, sha: str | None, status: str, findings: list) -> None:
+def _write_link_cache(repo: Path, sha: str | None, status: str, findings: list,
+                      findings_checked_at: str | None = None) -> None:
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     body = {
-        "checked_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "checked_at": now,
         "page_sha256": sha,
         "status": status,
         "findings": findings,
+        "findings_checked_at": findings_checked_at or now,
     }
     git_dir = repo / ".git"
     fd, tmp = tempfile.mkstemp(dir=git_dir, prefix=LINK_CACHE + ".")
@@ -409,8 +414,10 @@ def _write_link_cache(repo: Path, sha: str | None, status: str, findings: list) 
 def refresh_links(repo: Path) -> int:
     """Run the reference checker on the links page and cache what it finds.
 
-    A checker that cannot run is cached as skipped with no findings, so the
-    window is waited out instead of retried at every session start.
+    A checker that cannot run (offline, gh logged out) is cached as skipped, so
+    the window is waited out instead of retried at every session start. It keeps
+    the last findings, or the warning would vanish for a day while the links are
+    still dead.
     """
     try:
         sha = _page_sha(repo)
@@ -435,7 +442,13 @@ def refresh_links(repo: Path) -> int:
                 status = "skipped: checker timed out"
             except Exception:
                 status = "skipped: checker output unreadable"
-        _write_link_cache(repo, sha, status, findings)
+        found_at = None
+        if status != "checked":
+            prev = _read_link_cache(repo) or {}
+            findings = prev.get("findings") or []
+            if findings:
+                found_at = prev.get("findings_checked_at") or prev.get("checked_at")
+        _write_link_cache(repo, sha, status, findings, found_at)
     except Exception:
         pass
     return 0

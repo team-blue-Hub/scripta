@@ -646,7 +646,7 @@ class MaybeRefresh(unittest.TestCase):
     def test_windows_uses_creationflags(self):
         with mock.patch.object(hook, "_is_windows", return_value=True):
             _, kw = self.spawn(make_repo()).call_args
-        self.assertEqual(kw["creationflags"], 0x00000008 | 0x00000200)
+        self.assertEqual(kw["creationflags"], 0x08000000 | 0x00000200)
         self.assertNotIn("start_new_session", kw)
 
 
@@ -677,6 +677,20 @@ class RefreshLinks(unittest.TestCase):
         c = self.cache(repo)
         self.assertTrue(c["status"].startswith("skipped"))
         self.assertEqual(c["findings"], [])
+
+    def test_a_skipped_run_keeps_the_last_findings_and_their_day(self):
+        repo = make_repo()
+        out = json.dumps({"findings": [{"target": "https://notion.so/x", "error_class": "no-access"}]})
+        self.run_refresh(repo, return_value=subprocess.CompletedProcess([], 1, stdout=out, stderr=""))
+        first = self.cache(repo)
+        first["checked_at"] = first["findings_checked_at"] = "2026-10-01T09:00:00Z"
+        (repo / ".git" / "scripta-link-check.json").write_text(json.dumps(first))
+        self.run_refresh(repo, return_value=subprocess.CompletedProcess([], 2, stdout="", stderr="offline"))
+        c = self.cache(repo)
+        self.assertTrue(c["status"].startswith("skipped"))
+        self.assertNotEqual(c["checked_at"], "2026-10-01T09:00:00Z")
+        self.assertEqual(c["findings"], first["findings"])
+        self.assertEqual(c["findings_checked_at"], "2026-10-01T09:00:00Z")
 
     def test_timeout_writes_skipped(self):
         repo = make_repo()

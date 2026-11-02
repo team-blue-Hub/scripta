@@ -961,6 +961,14 @@ class TestProfileAndBacktick(unittest.TestCase):
             self.assertEqual(code, 1)
             self.assertEqual({f["file"] for f in report["findings"]}, {"sub/b.md"})
 
+    def test_only_with_verify_or_inventory_exits_2(self):
+        with tempfile.TemporaryDirectory() as d:
+            write(Path(d), "a.md", "x\n")
+            for mode in (["--verify", "results.json"], ["--inventory"]):
+                code, out, err = run_main(["--path", d, "--only", "a.md"] + mode)
+                self.assertEqual(code, 2)
+                self.assertIn("--only cannot be used with --verify or --inventory", err)
+
     def test_only_missing_file_exits_2_with_message(self):
         with tempfile.TemporaryDirectory() as d:
             code, out, err = run_main(["--path", d, "--only", "nope.md"])

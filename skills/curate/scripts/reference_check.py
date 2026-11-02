@@ -876,7 +876,7 @@ def extract_citations(root: Path, only: str | None = None) -> tuple[dict[str, li
         parts = path.relative_to(root).parts
         if any(part in SKIP_DIRS for part in parts):
             continue
-        rel = str(path.relative_to(root))
+        rel = path.relative_to(root).as_posix()
         citations, exempt_count = extract_file_citations(path, rel)
         exempt_total += exempt_count
         for rel2, lineno, url in citations:
@@ -1082,7 +1082,8 @@ def main(argv: list[str]) -> int:
                           "handbook itself, never merely trusted from the results file")
     ap.add_argument("--only", metavar="RELPATH",
                      help="scan only this one file (a path relative to --path); "
-                          "config still loads from the --path root")
+                          "config still loads from the --path root. Not with --verify "
+                          "or --inventory, which need every file")
     args = ap.parse_args(argv[1:])
 
     if not args.path:
@@ -1092,6 +1093,11 @@ def main(argv: list[str]) -> int:
     root = Path(args.path).expanduser().resolve()
     if not root.is_dir():
         print(f"error: not a directory: {root}", file=sys.stderr)
+        return 2
+
+    if args.only and (args.verify or args.inventory):
+        print("error: --only cannot be used with --verify or --inventory, which need every file",
+              file=sys.stderr)
         return 2
 
     only = None
