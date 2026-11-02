@@ -10,7 +10,8 @@ executed with `python3 -c` and `sh -c` against fake tools in a temp folder.
 
 Each test picks its OS: Base patches is_windows() to False and Windows patches
 it to True, so a Mac test takes the Mac path even when the suite runs on
-Windows. The tests that run sh or Mac tools for real are skipped there.
+Windows. The few Mac tests that cannot run on a Windows host (sh, a ':' PATH)
+are skipped there.
 
 Run: cd skills/daily-digest/scripts && python3 -m unittest -v test_digest_schedule
 """
@@ -36,8 +37,11 @@ import digest_schedule as ds  # noqa: E402
 
 HOOK = Path(__file__).resolve().parents[3] / "hooks" / "load_scripta_context.py"
 
-# For a test that runs sh, or a fake Mac tool written as a shell script.
-posix_only = unittest.skipIf(os.name == "nt", "runs sh or a shell-script tool")
+
+def skip_on_windows(why):
+    """For a Mac test that cannot run on a Windows host at all."""
+    return unittest.skipIf(os.name == "nt", why)
+
 
 DAILY_SQ2 = "Hub - Daily - Sq2"
 DAILY_ALL = "Hub - Daily - All"
@@ -602,7 +606,7 @@ class Window(Base):
         return (Path(rec + ".cwd").read_text().strip(), Path(rec + ".arg").read_text(),
                 Path(rec + ".cfg").read_text())
 
-    @posix_only
+    @skip_on_windows("runs sh, and a file name cannot hold a double quote")
     def test_a_handbook_path_with_a_space_and_a_quote_reaches_the_shell_as_one_path(self):
         weird = self.make_handbook(self.home / "PROJECTS" / "my hand's \"book\"")
         opened = self.open_with(weird)
@@ -623,7 +627,7 @@ class Window(Base):
         self.assertTrue(script.read_text(encoding="utf-8").startswith("#!/bin/bash\n"))
         self.assertFalse([a for a in self.world.osa() if any("do script" in x for x in a)])
 
-    @posix_only
+    @skip_on_windows("runs sh")
     def test_a_saved_claude_config_dir_is_exported(self):
         cmd = self.script_arg(self.open_with(self.handbook, config_dir="/Users/x/claude profile"))
         _, _, cfg = self.run_in_shell(cmd, self.tmp.name)
@@ -633,6 +637,7 @@ class Window(Base):
         cmd = self.script_arg(self.open_with(self.handbook))
         self.assertNotIn("CLAUDE_CONFIG_DIR", cmd)
 
+    @skip_on_windows("the Mac notice escapes the backslashes a Windows path has")
     def test_a_window_that_does_not_open_notifies_the_command_to_run_by_hand(self):
         self.world.window_fails = True
         self.set_state([])
@@ -712,9 +717,9 @@ class Install(Base):
         self.assertNotIn("CLAUDE_CONFIG_DIR", pl["EnvironmentVariables"])
         self.assertEqual(pl["ProgramArguments"][:3], ["/usr/bin/env", "python3", "-c"])
         self.assertEqual(pl["ProgramArguments"][3], ds.LOADER)
-        log = "%s/.scripta/digest-schedule/schedule.log" % h
+        log = str(self.home / ".scripta" / "digest-schedule" / "schedule.log")
         self.assertEqual((pl["StandardOutPath"], pl["StandardErrorPath"]), (log, log))
-        plist_path = "%s/Library/LaunchAgents/blue.team.scripta.digest.plist" % h
+        plist_path = str(self.home / "Library" / "LaunchAgents" / "blue.team.scripta.digest.plist")
         self.assertEqual(self.world.launchctl()[:2],
                          [["launchctl", "unload", plist_path], ["launchctl", "load", plist_path]])
         st = self.state()
@@ -1200,7 +1205,7 @@ class Uninstall(Base):
         self.world.calls[:] = []
         code, _ = self.main("uninstall")
         self.assertEqual(code, 0)
-        plist_path = "%s/Library/LaunchAgents/blue.team.scripta.digest.plist" % self.home
+        plist_path = str(self.home / "Library" / "LaunchAgents" / "blue.team.scripta.digest.plist")
         self.assertEqual(self.world.launchctl(), [["launchctl", "unload", plist_path]])
         self.assertFalse(Path(plist_path).exists())
         self.assertEqual(log.read_text(), "earlier runs\n")
@@ -1227,6 +1232,7 @@ class Status(Base):
         self.assertIn("NOT loaded", first[1])
         self.assertIn("installed and loaded", first[2])
 
+    @skip_on_windows("the plist PATH is split on ':', which a drive letter breaks")
     def test_tools_are_looked_up_on_the_plists_path_not_the_shells(self):
         self.main("install")
         job_bin = "%s/.local/bin" % self.home
@@ -1239,6 +1245,7 @@ class Status(Base):
         self.assertIn("python3: not found on the job's PATH", out)
         self.assertTrue(all(p == self.plist()["EnvironmentVariables"]["PATH"] for _, p in self.world.which_paths))
 
+    @skip_on_windows("the plist PATH is split on ':', which a drive letter breaks")
     def test_status_shows_handbook_rule_python_version_scripta_version_and_last_run(self):
         os.environ["SCRIPTA_HANDBOOK_PATH"] = str(self.handbook)
         self.main("install")
@@ -1568,7 +1575,7 @@ class Loader(unittest.TestCase):
         self.assertEqual(self.load(), 0)
         self.assertEqual(self.mark.read_text(), "0.13.0 run")
 
-    @posix_only
+    @skip_on_windows("the fake osascript is a shell script")
     def test_nothing_installed_notifies_and_exits_non_zero(self):
         self.assertNotEqual(self.load(), 0)
         self.assertFalse(self.mark.exists())
