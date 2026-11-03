@@ -20,6 +20,10 @@ jobs:
       - name: Hook tests
         working-directory: hooks
         run: python3 -m unittest -v test_load_scripta_context test_load_scripta_on_prompt
+      # The session-start hook runs the reference checker in the background.
+      - name: Reference check tests
+        working-directory: skills/curate/scripts
+        run: python3 -m unittest -v test_reference_check
       - name: A small handbook for the action
         run: |
           mkdir -p "$RUNNER_TEMP/handbook"
@@ -49,6 +53,11 @@ jobs:
       - name: Noon schedule tests
         working-directory: skills/daily-digest/scripts
         run: python3 -m unittest -v test_digest_schedule
+      # The hooks, and the link check they start, run under it too.
+      - name: Hook and reference check tests on 3.9
+        run: |
+          (cd hooks && python3 -m unittest -v test_load_scripta_context test_load_scripta_on_prompt)
+          (cd skills/curate/scripts && python3 -m unittest -v test_reference_check)
       # setup runs under the same system python3 on a Mac.
       - name: Setup tests on 3.9
         working-directory: skills/setup/scripts
