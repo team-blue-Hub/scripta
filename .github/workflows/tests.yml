@@ -53,3 +53,16 @@ jobs:
       - name: Setup tests on 3.9
         working-directory: skills/setup/scripts
         run: python3 -m unittest -v test_handbook_files
+
+  # The noon schedule runs on Windows laptops too, so its tests run there: a
+  # test that only works on a Mac fails here, not on a teammate's machine.
+  digest-schedule-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+      - name: Noon schedule tests on Windows
+        working-directory: skills/daily-digest/scripts
+        run: python -m unittest -v test_digest_schedule
