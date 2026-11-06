@@ -58,6 +58,7 @@ class World(object):
         self.grep_rc = None       # force an exit code for git grep
         self.blobs = {}           # (ref, path) -> text
         self.log_patch = ""
+        self.log_by_ref = {}      # when set, git log returns the patches of the refs it is given
         self.issues = []          # open issues, as gh returns them
         self.created = "https://github.com/x/y/issues/9\n"
 
@@ -86,6 +87,8 @@ class World(object):
                 return 0, self.blobs[(ref, path)], ""
             return 128, "", "not found"
         if a[0] == "git" and a[3] == "log":
+            if self.log_by_ref:
+                return 0, "".join(v for k, v in self.log_by_ref.items() if k in a), ""
             return 0, self.log_patch, ""
         raise AssertionError("unexpected call: %r" % (argv,))
 
@@ -280,6 +283,60 @@ class EndToEnd(Base):
         self.assertEqual(rc, 1)
         self.assertTrue(err.startswith("The check could not run"))
         self.assertEqual(out, "")
+
+    def git_call(self, sub):
+        return [c for c, _ in self.world.calls if c[0] == "git" and c[3] == sub][0]
+
+    def test_week_pr_filter_ignores_closed_and_unrelated_prs(self):
+        self.write_calls([{"title": SQ1}, {"title": SQ2}, {"title": PLANNING}])
+        self.world.prs = [pr(3, WEEK_BRANCH, "MERGED", oid="wk1"),
+                          pr(4, WEEK_BRANCH, "CLOSED", oid="wk2"),
+                          pr(5, "docs/something", "OPEN", oid="oth")]
+        self.world.log_by_ref = {"wk1": "+### 2026-11-10 · %s\n" % SQ1,
+                                 "wk2": "+### 2026-11-10 · %s\n" % SQ2,
+                                 "oth": "+### 2026-11-10 · %s\n" % PLANNING}
+        self.assertEqual(self.missing(), [("2026-11-10", SQ2), ("2026-11-10", PLANNING)])
+        log = self.git_call("log")
+        self.assertEqual(log[log.index("--no-color") + 1:log.index("--")], ["origin/main", "wk1"])
+
+    def test_window_across_two_weeks_reads_both_week_prs(self):
+        self.write_calls([{"title": SQ1, "days": "wed"}, {"title": SQ2, "days": "tue"}])
+        prev_week = ms.week_names(D(2026, 11, 4))[1]
+        self.assertNotEqual(prev_week, WEEK_BRANCH)
+        self.world.prs = [pr(3, prev_week, "MERGED", oid="wkA"), pr(4, WEEK_BRANCH, "MERGED", oid="wkB")]
+        self.world.log_by_ref = {"wkA": "+### 2026-11-04 · %s\n" % SQ1,
+                                 "wkB": "+### 2026-11-10 · %s\n" % SQ2}
+        self.assertEqual(self.missing(n=5), [])
+        log = self.git_call("log")
+        self.assertIn("wkA", log)
+        self.assertIn("wkB", log)
+
+    def test_found_via_adr_source_on_main(self):
+        self.one_call()
+        self.world.grep_hits = ["origin/main:decisions/d.md"]
+        self.world.blobs[("origin/main", "decisions/d.md")] = adr(SQ1, "2026-11-10")
+        self.assertEqual(self.missing(), [])
+        self.assertIn("origin/main", self.git_call("grep"))
+        self.assertEqual(self.git_call("show")[4], "origin/main:decisions/d.md")
+
+    def assert_failed_run_leaves_issue_alone(self):
+        rc, out, err = self.run_main("--today", "2026-11-11", "--days", "1", "--issue")
+        self.assertEqual(rc, 1)
+        self.assertTrue(err.startswith("The check could not run"))
+        self.assertEqual(self.world.gh_writes(), [])
+        self.assertFalse([c for c, _ in self.world.calls if c[:3] == ["gh", "issue", "list"]])
+
+    def test_failed_run_with_issue_flag_gh_pr_list_fails(self):
+        self.one_call()
+        self.world.issues = [{"number": 4, "title": ms.ISSUE_TITLE}]
+        self.world.gh_list_fails = True
+        self.assert_failed_run_leaves_issue_alone()
+
+    def test_failed_run_with_issue_flag_git_grep_fails(self):
+        self.one_call()
+        self.world.issues = [{"number": 4, "title": ms.ISSUE_TITLE}]
+        self.world.grep_rc = 2
+        self.assert_failed_run_leaves_issue_alone()
 
     def test_main_prints_report_and_returns_0_with_missing(self):
         self.one_call()
