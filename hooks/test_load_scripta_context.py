@@ -491,6 +491,20 @@ class GuardContract(unittest.TestCase):
         # Claude Code offloads hook output near 10KB; the guard must stay under.
         self.assertLess(MAX_BYTES, 10_000)
 
+    def test_part_one_with_its_lead_line_stays_under_the_offload_threshold(self):
+        from load_scripta_on_prompt import _lead_line
+        self.assertLess(len(_lead_line()) + MAX_BYTES, 10_000)
+
+    def test_hooks_json_registers_one_prompt_hook_per_part(self):
+        from load_scripta_context import MAP_PARTS
+        config = json.loads((Path(__file__).parent / "hooks.json").read_text(encoding="utf-8"))
+        commands = [h["command"] for entry in config["hooks"]["UserPromptSubmit"]
+                    for h in entry["hooks"]]
+        self.assertEqual(len(commands), MAP_PARTS)
+        for k, command in enumerate(commands, 1):
+            self.assertIn("load_scripta_on_prompt.py", command)
+            self.assertTrue(command.endswith(f"--part {k}"), command)
+
 
 SKILLS = Path(__file__).resolve().parent.parent / "skills"
 

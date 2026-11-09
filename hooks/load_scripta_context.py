@@ -28,12 +28,15 @@ needs its own measurement before team-wide rollout.
 Size still matters for the on-demand payload: Claude Code offloads hook output
 bigger than ~10KB to a file and puts only a ~2KB preview into context, which
 silently destroys the injection (an append-only list can double the
-payload in weeks). Two defenses, still
-in force for whatever calls assemble_maps_payload():
+payload in weeks). Three defenses, still
+in force for whatever calls maps_payload_report():
     1. compact_index() replaces the per-ADR bullets — the only unbounded
        section — with a one-line pointer to decisions/; frontmatter is
        stripped from both pages.
-    2. A hard MAX_BYTES guard trims the assembled payload with a visible
+    2. The payload is split between lines into up to MAP_PARTS parts of at most
+       MAX_BYTES each, one per prompt-hook registration in hooks.json. Claude
+       Code measures each hook's text on its own, so every part lands inline.
+    3. When even every part cannot hold it, the tail is cut with a visible
        notice, so future handbook growth degrades loudly, never silently.
 
 Registration is automatic: this hook is declared in hooks/hooks.json next to this
