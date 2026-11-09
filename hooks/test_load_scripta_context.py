@@ -295,16 +295,16 @@ class RungsFourAndFive(unittest.TestCase):
 class FallbackTrim(unittest.TestCase):
     def test_last_resort_has_single_clean_notice(self):
         import tempfile
-        # Registry so large even compacted rows overflow: forces the tail-trim.
-        rows = "\n".join(f"| fact {i} | [h{i}](h{i}.md) |" for i in range(400))
+        # Registry so large even compacted rows overflow every part: forces the tail-trim.
+        rows = "\n".join(f"| fact {i} | [h{i}](h{i}.md) |" for i in range(1400))
         with tempfile.TemporaryDirectory() as d:
             tmp = Path(d)
             (tmp / "index.md").write_text("# Index\n", encoding="utf-8")
             (tmp / "where-truth-lives.md").write_text(
                 "| The fact | Home |\n|---|---|\n" + rows + "\n", encoding="utf-8")
             body = assemble_maps_payload(tmp)
-            self.assertLessEqual(len(body.encode()), MAX_BYTES)
             self.assertIn("payload trimmed", body)
+            self.assertEqual(body.count("[scripta hook:"), 1)  # one notice, no rung note left behind
             self.assertNotIn("index descriptions dropped", body)  # rung-3 note not doubled
 
 
@@ -341,27 +341,124 @@ class MapsReport(unittest.TestCase):
     def test_fitting_only_by_dropping_the_page_rules_is_not_ok(self):
         import tempfile
         from load_scripta_context import maps_payload_report
-        # Rows that fit on their own, page prose that pushes rung 4 over the cap.
+        # Rows that fit on their own, and one page-prose line longer than a whole
+        # part, which no split between lines can carry.
         with tempfile.TemporaryDirectory() as d:
-            r = maps_payload_report(_handbook(Path(d), 150, prose="## The rule\n\n" + "word " * 1200))
+            r = maps_payload_report(_handbook(Path(d), 150, prose="## The rule\n\n" + "word " * 2000))
             self.assertEqual(r["rung"], 5)
             self.assertFalse(r["ok"])
 
     def test_a_cut_tail_is_not_ok_and_reports_what_it_needed(self):
         import tempfile
-        from load_scripta_context import TRIMMED, maps_payload_report
+        from load_scripta_context import MAP_PARTS, TRIMMED, maps_payload_report
         with tempfile.TemporaryDirectory() as d:
-            r = maps_payload_report(_handbook(Path(d), 600))
+            r = maps_payload_report(_handbook(Path(d), 1400))
             self.assertEqual(r["rung"], TRIMMED)
             self.assertFalse(r["ok"])
-            self.assertGreater(r["bytes"], MAX_BYTES, "the size is what the last rung wanted before the cut")
-            self.assertLessEqual(len(r["body"].encode()), MAX_BYTES, "the body itself is still cut to fit")
+            self.assertGreater(r["bytes"], MAP_PARTS * MAX_BYTES,
+                               "the size is what the last rung wanted before the cut")
+            self.assertLessEqual(len(r["body"].encode()), MAP_PARTS * MAX_BYTES,
+                                 "the body itself is still cut to fit")
 
     def test_no_map_pages_means_no_report(self):
         import tempfile
         from load_scripta_context import maps_payload_report
         with tempfile.TemporaryDirectory() as d:
             self.assertIsNone(maps_payload_report(Path(d)))
+
+
+TABLE_HEAD = ["| The fact | Home |", "|---|---|"]
+
+
+def _strip_part_prefix(part: str) -> str:
+    """A part's own lines, without the position line and a repeated table head."""
+    lines = part.split("\n")
+    if lines and lines[0].startswith("[scripta: handbook maps, part "):
+        lines = lines[1:]
+        if lines[:2] == TABLE_HEAD:
+            lines = lines[2:]
+    return "\n".join(lines)
+
+
+class MapsParts(unittest.TestCase):
+    """The maps travel in up to MAP_PARTS hook texts, each under MAX_BYTES.
+
+    Claude Code caps each hook text on its own, so a payload that outgrows one
+    text is split across several prompt-hook registrations instead of losing rows.
+    """
+
+    def _report(self, rows, prose=""):
+        import tempfile
+        from load_scripta_context import maps_payload_report
+        with tempfile.TemporaryDirectory() as d:
+            return maps_payload_report(_handbook(Path(d), rows, prose=prose))
+
+    def _facts(self, parts):
+        import re
+        return re.findall(r"\| (fact \d+) \|", "\n".join(parts))
+
+    def test_a_small_handbook_is_one_part_with_no_position_line(self):
+        r = self._report(5)
+        self.assertEqual(r["count"], 1)
+        self.assertEqual(r["rung"], 1)
+        self.assertEqual(r["parts"], [r["body"]])
+        self.assertNotIn("handbook maps, part", r["parts"][0])
+
+    def test_one_part_at_rung_4_beats_two_parts_at_a_better_rung(self):
+        import tempfile
+        from load_scripta_context import maps_payload_report
+        index = "# Index\n" + "\n".join(f"- [p{i}](p{i}.md) — d" for i in range(500)) + "\n"
+        with tempfile.TemporaryDirectory() as d:
+            tmp = _handbook(Path(d), 40)
+            (tmp / "index.md").write_text(index, encoding="utf-8")
+            r = maps_payload_report(tmp)
+        self.assertEqual((r["count"], r["rung"]), (1, 4))
+        self.assertTrue(r["ok"])
+
+    def test_too_big_for_one_part_becomes_two_with_every_row_once(self):
+        r = self._report(500)
+        self.assertEqual(r["count"], 2)
+        self.assertTrue(r["ok"])
+        self.assertEqual(self._facts(r["parts"]), [f"fact {i}" for i in range(500)])
+        self.assertTrue(r["parts"][0].startswith("[scripta: handbook maps, part 1 of 2"))
+        self.assertTrue(r["parts"][1].startswith("[scripta: handbook maps, part 2 of 2"))
+
+    def test_three_parts_each_under_the_cap(self):
+        r = self._report(900)
+        self.assertEqual(r["count"], 3)
+        self.assertTrue(r["ok"])
+        for part in r["parts"]:
+            self.assertLessEqual(len(part.encode("utf-8")), MAX_BYTES)
+        self.assertEqual(r["largest"], max(len(p.encode("utf-8")) for p in r["parts"]))
+        self.assertEqual(len(self._facts(r["parts"])), 900)
+
+    def test_no_row_is_cut_or_repeated(self):
+        r = self._report(900)
+        self.assertEqual("\n".join(_strip_part_prefix(p) for p in r["parts"]), r["body"])
+
+    def test_a_part_that_starts_in_the_table_repeats_its_head(self):
+        r = self._report(500)
+        second = r["parts"][1].split("\n")
+        self.assertEqual(second[1:3], TABLE_HEAD)
+        self.assertTrue(second[3].startswith("| fact "))
+
+    def test_a_line_longer_than_a_part_falls_to_rung_5(self):
+        r = self._report(150, prose="## The rule\n\n" + "word " * 2000)
+        self.assertEqual(r["rung"], 5)
+        self.assertFalse(r["ok"])
+        self.assertEqual(len(self._facts(r["parts"])), 150)
+
+    def test_more_than_every_part_holds_cuts_the_tail_with_a_notice(self):
+        from load_scripta_context import MAP_PARTS, TRIMMED
+        r = self._report(1400)
+        self.assertEqual(r["rung"], TRIMMED)
+        self.assertFalse(r["ok"])
+        self.assertEqual(r["count"], MAP_PARTS)
+        self.assertGreater(r["bytes"], MAP_PARTS * MAX_BYTES)
+        for part in r["parts"]:
+            self.assertLessEqual(len(part.encode("utf-8")), MAX_BYTES)
+        self.assertIn("payload trimmed", r["parts"][-1])
+        self.assertEqual(r["body"].count("payload trimmed"), 1)
 
 
 class CheckMapsCli(unittest.TestCase):
@@ -377,9 +474,12 @@ class CheckMapsCli(unittest.TestCase):
         import tempfile
         with tempfile.TemporaryDirectory() as d:
             code, out = self._run(_handbook(Path(d), 5))
-            self.assertEqual(code, 0); self.assertIn("fit", out)
+            self.assertEqual(code, 0); self.assertIn("fit in 1 of 3 parts", out)
         with tempfile.TemporaryDirectory() as d:
-            code, out = self._run(_handbook(Path(d), 600))
+            code, out = self._run(_handbook(Path(d), 500))
+            self.assertEqual(code, 0); self.assertIn("fit in 2 of 3 parts", out)
+        with tempfile.TemporaryDirectory() as d:
+            code, out = self._run(_handbook(Path(d), 1400))
             self.assertEqual(code, 1); self.assertIn("too big", out); self.assertIn("never arrive", out)
         with tempfile.TemporaryDirectory() as d:
             code, _ = self._run(Path(d))
@@ -648,6 +748,43 @@ class MaybeRefresh(unittest.TestCase):
             _, kw = self.spawn(make_repo()).call_args
         self.assertEqual(kw["creationflags"], 0x08000000 | 0x00000200)
         self.assertNotIn("start_new_session", kw)
+
+
+class FreshenLater(unittest.TestCase):
+    """The prompt hook's pull runs after the read, detached, at most once per window."""
+
+    def spawn(self, repo, ttl=30):
+        with mock.patch.object(hook.subprocess, "Popen") as popen:
+            hook.freshen_later(repo, ttl)
+        return popen
+
+    def test_a_stale_window_starts_one_detached_pull(self):
+        repo = make_repo()
+        popen = self.spawn(repo)
+        popen.assert_called_once()
+        args, kw = popen.call_args
+        self.assertEqual(args[0][2:], ["--freshen", str(repo)])
+        self.assertEqual(kw["stdout"], subprocess.DEVNULL)
+
+    def test_a_fresh_window_starts_nothing(self):
+        repo = make_repo()
+        (repo / ".git" / hook.PULL_MARKER).touch()
+        self.spawn(repo).assert_not_called()
+
+    def test_the_window_is_claimed_before_the_pull_finishes(self):
+        repo = make_repo()
+        self.spawn(repo).assert_called_once()
+        self.spawn(repo).assert_not_called()
+
+    def test_popen_raising_is_swallowed(self):
+        with mock.patch.object(hook.subprocess, "Popen", side_effect=OSError("no")):
+            hook.freshen_later(make_repo(), 30)
+
+    def test_the_freshen_entry_point_never_fails(self):
+        with tempfile.TemporaryDirectory() as d:
+            done = subprocess.run([sys.executable, str(Path(hook.__file__)), "--freshen", d],
+                                  capture_output=True, timeout=30)
+        self.assertEqual(done.returncode, 0)
 
 
 class RefreshLinks(unittest.TestCase):
