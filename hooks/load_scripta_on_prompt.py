@@ -28,13 +28,12 @@ missing repo, or an unreadable page all fall through to "output nothing, exit 0"
 from __future__ import annotations
 
 import json
-import os
 import re
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
-from load_scripta_context import freshen_later, locate_repo, maps_payload_report
+from load_scripta_context import freshen_later, hook_ttl_min, locate_repo, maps_payload_report
 
 # Starter set of word/phrase triggers that suggest the prompt is asking about
 # a team fact rather than the code or the live session. Tune it to your team. Deliberately broad on a few entries ("where do",
@@ -74,19 +73,11 @@ def _lead_line() -> str:
 
 
 def _part(argv: list[str]) -> int:
-    """Which slice of the maps this registration sends: `--part k`, else part 1."""
     try:
         k = int(argv[argv.index("--part") + 1])
     except (ValueError, IndexError):
         return 1
     return k if k >= 1 else 1
-
-
-def _ttl() -> int:
-    try:
-        return int(os.environ.get("SCRIPTA_HOOK_TTL_MIN", "30"))
-    except ValueError:
-        return 30
 
 
 def main() -> int:
@@ -136,7 +127,7 @@ def main() -> int:
             json.dump(out, sys.stdout)
             sys.stdout.flush()
         if part == 1:
-            freshen_later(repo, _ttl())
+            freshen_later(repo, hook_ttl_min())
     except Exception:
         return 0  # a malformed/unreadable map page must never crash the prompt
     return 0

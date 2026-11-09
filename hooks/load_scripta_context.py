@@ -99,7 +99,7 @@ CONFIG_FILE = Path.home() / ".config" / "scripta" / "config.json"
 MAX_BYTES = 9_000
 # Claude Code measures each hook's text on its own, so the prompt hook is
 # registered this many times in hooks.json (`--part 1` to `--part N`) and each
-# registration sends one slice of the same payload. Keep the two in step.
+# registration sends one slice of the same payload.
 MAP_PARTS = 3
 REGISTRY_CELL_CAP = 140  # compact_registry: max chars kept of a home cell
 SELF_LINK = re.compile(r"\[`?([^\]`]+?)`?\]\(\1\)")  # compact_registry: [`p`](p) -> `p`
@@ -299,6 +299,13 @@ def _pull(repo: Path) -> None:
         pass  # never block a session on freshness
 
 
+def hook_ttl_min() -> int:
+    try:
+        return int(os.environ.get("SCRIPTA_HOOK_TTL_MIN", "30"))
+    except ValueError:
+        return 30
+
+
 def _window_open(marker: Path, ttl_min: int) -> bool:
     return not (marker.exists() and (time.time() - marker.stat().st_mtime) < ttl_min * 60)
 
@@ -361,7 +368,7 @@ def freshen_later(repo: Path, ttl_min: int) -> None:
             pass
         _spawn_detached("--freshen", str(repo))
     except Exception:
-        pass  # freshness must never touch a prompt
+        pass
 
 
 def _read_link_cache(repo: Path) -> dict | None:
@@ -545,12 +552,12 @@ def split_into_parts(body: str, count: int) -> list[str] | None:
             size += _size(lines[end]) + 1
             end += 1
         if end == start:
-            return None  # one line longer than a whole part
+            return None
         parts.append("\n".join(prefix + lines[start:end]))
         start = end
     if len(parts) < count:
-        # Fewer parts than planned: say the true count. The position line is the
-        # same length for any single-digit count, so the split does not move.
+        # Fewer parts than planned: split again so each says the true count. A
+        # smaller count never makes the position line longer, so the split still fits.
         return split_into_parts(body, len(parts))
     return parts
 
@@ -647,14 +654,12 @@ def _assemble_maps(repo: Path) -> tuple[list[str] | None, int, int, str | None]:
     # Fewest parts first, so a session gets no more text than the rows need; then,
     # within that count, the most complete rung that fits. Rung 5 is tried only
     # when no count up to MAP_PARTS holds rung 4.
-    for count in range(1, MAP_PARTS + 1):
-        for rung in range(1, MAX_OK_RUNG + 1):
-            parts = split_into_parts(body_at(rung), count)
-            if parts is not None:
-                return parts, rung, _size(body_at(rung)), body_at(rung)
-    parts = split_into_parts(body_at(5), MAP_PARTS)
-    if parts is not None:
-        return parts, 5, _size(body_at(5)), body_at(5)
+    tries = [(count, rung) for count in range(1, MAP_PARTS + 1)
+             for rung in range(1, MAX_OK_RUNG + 1)] + [(MAP_PARTS, 5)]
+    for count, rung in tries:
+        parts = split_into_parts(body_at(rung), count)
+        if parts is not None:
+            return parts, rung, _size(body_at(rung)), body_at(rung)
     needed = _size(body_at(5))
     notice = (
         "\n\n[scripta hook: payload trimmed to stay under Claude Code's "
@@ -663,7 +668,7 @@ def _assemble_maps(repo: Path) -> tuple[list[str] | None, int, int, str | None]:
     )
     # Rebuild the last rung without its own note before cutting: cutting
     # through the note and appending this one would leave a garbled double
-    # tail. Keep the most whole lines that still fit every part with the notice.
+    # tail.
     lines = build(index_pointer,
                   lambda t: registry_table_only(compact_registry(t)), "").split("\n")
     lo, hi, best = 0, len(lines), None
@@ -757,11 +762,7 @@ def main() -> int:
     if repo is None:
         return 0  # no handbook checkout here — stay silent
 
-    try:
-        ttl = int(os.environ.get("SCRIPTA_HOOK_TTL_MIN", "30"))
-    except ValueError:
-        ttl = 30
-    freshen(repo, ttl)
+    freshen(repo, hook_ttl_min())
 
     try:
         text = _pointer_text(repo)
