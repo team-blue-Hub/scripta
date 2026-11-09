@@ -28,12 +28,15 @@ needs its own measurement before team-wide rollout.
 Size still matters for the on-demand payload: Claude Code offloads hook output
 bigger than ~10KB to a file and puts only a ~2KB preview into context, which
 silently destroys the injection (an append-only list can double the
-payload in weeks). Two defenses, still
-in force for whatever calls assemble_maps_payload():
+payload in weeks). Three defenses, still
+in force for whatever calls maps_payload_report():
     1. compact_index() replaces the per-ADR bullets — the only unbounded
        section — with a one-line pointer to decisions/; frontmatter is
        stripped from both pages.
-    2. A hard MAX_BYTES guard trims the assembled payload with a visible
+    2. The payload is split between lines into up to MAP_PARTS parts of at most
+       MAX_BYTES each, one per prompt-hook registration in hooks.json. Claude
+       Code measures each hook's text on its own, so every part lands inline.
+    3. When even every part cannot hold it, the tail is cut with a visible
        notice, so future handbook growth degrades loudly, never silently.
 
 Registration is automatic: this hook is declared in hooks/hooks.json next to this
@@ -91,9 +94,13 @@ LINK_SHOWN_CAP = 5
 LINK_WARN_CLASSES = {"no-access": "no access", "gone": "gone"}
 CONFIG_FILE = Path.home() / ".config" / "scripta" / "config.json"
 
-# Claude Code offloads hook output near 10KB; stay clearly under so the whole
-# payload always lands inline. Includes headroom for slow catalog growth.
+# Claude Code offloads a hook text over 10,000 characters to a file; stay clearly
+# under so each part always lands inline, with room for the prompt hook's lead line.
 MAX_BYTES = 9_000
+# Claude Code measures each hook's text on its own, so the prompt hook is
+# registered this many times in hooks.json (`--part 1` to `--part N`) and each
+# registration sends one slice of the same payload.
+MAP_PARTS = 3
 REGISTRY_CELL_CAP = 140  # compact_registry: max chars kept of a home cell
 SELF_LINK = re.compile(r"\[`?([^\]`]+?)`?\]\(\1\)")  # compact_registry: [`p`](p) -> `p`
 
@@ -282,14 +289,7 @@ def locate_repo() -> Path | None:
                  if (c / "where-truth-lives.md").is_file()), None)
 
 
-def freshen(repo: Path, ttl_min: int) -> None:
-    marker = repo / ".git" / PULL_MARKER
-    # Inside the TTL window: skip the pull WITHOUT re-stamping. The marker must
-    # measure time since the last pull *attempt*, not the last session — stamping
-    # here would reset the window on every session, so a user opening sessions
-    # more often than the TTL would never pull again (the throttle never expires).
-    if marker.exists() and (time.time() - marker.stat().st_mtime) < ttl_min * 60:
-        return
+def _pull(repo: Path) -> None:
     try:
         subprocess.run(
             ["git", "-C", str(repo), "pull", "--ff-only", "--quiet"],
@@ -297,6 +297,29 @@ def freshen(repo: Path, ttl_min: int) -> None:
         )
     except Exception:
         pass  # never block a session on freshness
+
+
+def hook_ttl_min() -> int:
+    try:
+        return int(os.environ.get("SCRIPTA_HOOK_TTL_MIN", "30"))
+    except ValueError:
+        return 30
+
+
+def _window_open(marker: Path, ttl_min: int) -> bool:
+    return not (marker.exists() and (time.time() - marker.stat().st_mtime) < ttl_min * 60)
+
+
+def freshen(repo: Path, ttl_min: int) -> None:
+    marker = repo / ".git" / PULL_MARKER
+    # Inside the TTL window: skip the pull WITHOUT re-stamping. The marker must
+    # measure time since the last pull *attempt*, not the last session — stamping
+    # here would reset the window on every session, so a user opening sessions
+    # more often than the TTL would never pull again (the throttle never expires).
+    if not _window_open(marker, ttl_min):
+        return
+    try:
+        _pull(repo)
     finally:
         # Stamp on any pull *attempt* (incl. timeout/failure), so a flaky network
         # throttles to one attempt per TTL window instead of re-pulling and stalling
@@ -309,6 +332,43 @@ def freshen(repo: Path, ttl_min: int) -> None:
 
 def _is_windows() -> bool:
     return os.name == "nt"
+
+
+def _spawn_detached(*args: str) -> None:
+    """Run this file again with `args`, detached, with no console and no output."""
+    kwargs: dict = {}
+    if _is_windows():
+        # CREATE_NO_WINDOW, not DETACHED_PROCESS: a detached child has no
+        # console, so a process it starts would open a visible one.
+        kwargs["creationflags"] = 0x08000000 | 0x00000200  # CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP
+    else:
+        kwargs["start_new_session"] = True
+    subprocess.Popen(
+        [sys.executable, str(Path(__file__).resolve()), *args],
+        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        **kwargs,
+    )
+
+
+def freshen_later(repo: Path, ttl_min: int) -> None:
+    """The prompt hook's pull: started after the maps were read, for the next prompt.
+
+    The prompt hook runs as several parts at once, each reading the map pages. A
+    pull in front of those reads could land between them, so one part would send
+    the new pages and another the old. Started after the reads, detached, the pull
+    lands for the next prompt instead, and never holds up this one.
+    """
+    marker = repo / ".git" / PULL_MARKER
+    try:
+        if not _window_open(marker, ttl_min):
+            return
+        try:
+            marker.touch()  # claim the window now, so the next prompt starts no second pull
+        except Exception:
+            pass
+        _spawn_detached("--freshen", str(repo))
+    except Exception:
+        pass
 
 
 def _read_link_cache(repo: Path) -> dict | None:
@@ -371,18 +431,7 @@ def maybe_refresh_links(repo: Path, hours: float) -> None:
         if lock.exists() and (time.time() - lock.stat().st_mtime) < LINK_LOCK_MIN * 60:
             return
         lock.touch()
-        kwargs: dict = {}
-        if _is_windows():
-            # CREATE_NO_WINDOW, not DETACHED_PROCESS: a detached refresher has no
-            # console, so the checker it starts would open a visible one.
-            kwargs["creationflags"] = 0x08000000 | 0x00000200  # CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP
-        else:
-            kwargs["start_new_session"] = True
-        subprocess.Popen(
-            [sys.executable, str(Path(__file__).resolve()), "--refresh-links", str(repo)],
-            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-            **kwargs,
-        )
+        _spawn_detached("--refresh-links", str(repo))
     except Exception:
         pass  # a link check must never touch session start
 
@@ -454,9 +503,71 @@ def refresh_links(repo: Path) -> int:
     return 0
 
 
-def _assemble_maps(repo: Path) -> tuple[str | None, int, int]:
+def _size(text: str) -> int:
+    return len(text.encode("utf-8"))
+
+
+def _position_line(k: int, count: int, version: str) -> str:
+    return (f"[scripta: handbook maps, part {k} of {count}, version {version}; if a part "
+            "is missing or the versions differ, read where-truth-lives.md from the checkout]")
+
+
+def _table_span(lines: list[str]) -> tuple[int, int] | None:
+    """Where the registry table sits: (index of its head row, index past its last row)."""
+    head = next((i for i, line in enumerate(lines[:-1])
+                 if line.lstrip().startswith("| The fact")
+                 and lines[i + 1].strip() and set(lines[i + 1].strip()) <= set("|-: ")), None)
+    if head is None:
+        return None
+    end = next((i for i in range(head + 2, len(lines))
+                if lines[i].strip() and not lines[i].lstrip().startswith("|")), len(lines))
+    return head, end
+
+
+def split_into_parts(body: str, count: int) -> list[str] | None:
+    """Split the payload between lines into at most `count` parts of MAX_BYTES each.
+
+    A payload that fits one part goes out as it is. When it needs several, each
+    part opens with a line naming its position and a short version of the whole
+    payload, so a part that did not arrive, or parts built from two versions of the
+    pages, are visible. A part that starts inside the registry table repeats the
+    table's head, so its rows still read as a table. Returns None when the payload
+    needs more parts than `count`, or holds a single line longer than a part.
+    """
+    if _size(body) <= MAX_BYTES:
+        return [body]
+    if count < 2:
+        return None
+    lines = body.split("\n")
+    span = _table_span(lines)
+    version = hashlib.sha256(body.encode("utf-8")).hexdigest()[:8]
+    parts: list[str] = []
+    start = 0
+    while start < len(lines):
+        if len(parts) == count:
+            return None
+        prefix = [_position_line(len(parts) + 1, count, version)]
+        if span and span[0] < start < span[1]:
+            # Repeat the head row, and the separator unless this part starts on it.
+            prefix += lines[span[0]:min(start, span[0] + 2)]
+        size, end = _size("\n".join(prefix)), start
+        while end < len(lines) and size + _size(lines[end]) + 1 <= MAX_BYTES:
+            size += _size(lines[end]) + 1
+            end += 1
+        if end == start:
+            return None
+        parts.append("\n".join(prefix + lines[start:end]))
+        start = end
+    if len(parts) < count:
+        # Fewer parts than planned: split again so each says the true count. A
+        # smaller count never makes the position line longer, so the split still fits.
+        return split_into_parts(body, len(parts))
+    return parts
+
+
+def _assemble_maps(repo: Path) -> tuple[list[str] | None, int, int, str | None]:
     """Assemble the full map-pages body: both pages, compacted, frontmatter-stripped,
-    MAX_BYTES-guarded. Returns None if neither page is present.
+    and split into parts of at most MAX_BYTES. Returns None if neither page is present.
 
     This payload is not injected on every session. It
     backs two on-demand paths: a human reading the checkout directly,
@@ -530,30 +641,50 @@ def _assemble_maps(repo: Path) -> tuple[str | None, int, int]:
         (index_pointer,
          lambda t: registry_table_only(compact_registry(t)), table_only_note),
     )
-    # Returns (body, rung, size): the rung that fit (1-5), or TRIMMED when none
-    # did, and the bytes that rung needed. On TRIMMED the size is what even the
-    # last rung wanted before the cut, which is the number a fix has to beat.
-    body = None
-    for rung, (index_extra, registry_fn, note) in enumerate(rungs, 1):
-        body = build(index_extra, registry_fn, note)
-        if body is None:
-            return None, 0, 0
-        size = len(body.encode("utf-8"))
-        if size <= MAX_BYTES:
-            return body, rung, size
-    needed = len(body.encode("utf-8"))
+    # Returns (parts, rung, size, body): the parts a session receives, the rung
+    # that fit (1-5) or TRIMMED when none did, the bytes that rung needed, and the
+    # unsplit body. On TRIMMED the size is what even the last rung wanted before
+    # the cut, which is the number a fix has to beat.
+    bodies: dict = {}
+
+    def body_at(rung: int) -> str | None:
+        if rung not in bodies:
+            bodies[rung] = build(*rungs[rung - 1])
+        return bodies[rung]
+
+    if body_at(1) is None:
+        return None, 0, 0, None
+    # Fewest parts first, so a session gets no more text than the rows need; then,
+    # within that count, the most complete rung that fits. Rung 5 is tried only
+    # when no count up to MAP_PARTS holds rung 4.
+    tries = [(count, rung) for count in range(1, MAP_PARTS + 1)
+             for rung in range(1, MAX_OK_RUNG + 1)] + [(MAP_PARTS, 5)]
+    for count, rung in tries:
+        parts = split_into_parts(body_at(rung), count)
+        if parts is not None:
+            return parts, rung, _size(body_at(rung)), body_at(rung)
+    needed = _size(body_at(5))
     notice = (
         "\n\n[scripta hook: payload trimmed to stay under Claude Code's "
         "inline hook-output limit — read index.md and where-truth-lives.md "
         "from the checkout for the full maps]"
     )
-    # Rebuild the last rung without its own note before slicing: cutting
+    # Rebuild the last rung without its own note before cutting: cutting
     # through the note and appending this one would leave a garbled double
     # tail.
-    body = build(index_pointer,
-                 lambda t: registry_table_only(compact_registry(t)), "")
-    keep = MAX_BYTES - len(notice.encode("utf-8"))
-    return body.encode("utf-8")[:keep].decode("utf-8", errors="ignore") + notice, TRIMMED, needed
+    lines = build(index_pointer,
+                  lambda t: registry_table_only(compact_registry(t)), "").split("\n")
+    lo, hi, best = 0, len(lines), None
+    while lo <= hi:
+        mid = (lo + hi) // 2
+        body = "\n".join(lines[:mid]) + notice
+        parts = split_into_parts(body, MAP_PARTS)
+        if parts is not None:
+            best, lo = (parts, body), mid + 1
+        else:
+            hi = mid - 1
+    parts, body = best
+    return parts, TRIMMED, needed, body
 
 
 # What each rung gives up, in words a person reading a CI log or a session
@@ -572,22 +703,23 @@ RUNG_NAMES = {
 
 
 def assemble_maps_payload(repo: Path) -> str | None:
-    """The body a session receives. See _assemble_maps for how it is built."""
-    return _assemble_maps(repo)[0]
+    """The body a session receives, before it is split into parts. See _assemble_maps."""
+    return _assemble_maps(repo)[3]
 
 
 def maps_payload_report(repo: Path) -> dict | None:
     """What a session receives from this handbook, and whether it is whole.
 
-    ok is True while the payload fits at rung MAX_OK_RUNG or better. This is the
-    one measurement the handbook's CI, the scheduled check and the prompt hook's
-    warning all use, so there is no second copy of the rules to drift from.
+    ok is True while the payload fits MAP_PARTS parts at rung MAX_OK_RUNG or
+    better. This is the one measurement the handbook's CI, the scheduled check and
+    the prompt hook all use, so there is no second copy of the rules to drift from.
     """
-    body, rung, size = _assemble_maps(repo)
-    if body is None:
+    parts, rung, size, body = _assemble_maps(repo)
+    if parts is None:
         return None
-    return {"body": body, "rung": rung, "bytes": size, "cap": MAX_BYTES,
-            "ok": rung <= MAX_OK_RUNG, "what": RUNG_NAMES[rung]}
+    return {"body": body, "parts": parts, "count": len(parts),
+            "largest": max(_size(p) for p in parts), "rung": rung, "bytes": size,
+            "cap": MAX_BYTES, "ok": rung <= MAX_OK_RUNG, "what": RUNG_NAMES[rung]}
 
 
 def check_maps_cli(path: str) -> int:
@@ -598,16 +730,19 @@ def check_maps_cli(path: str) -> int:
         print(f"handbook maps: no index.md or where-truth-lives.md under {path}")
         return 2
     rung, size, cap, what = report["rung"], report["bytes"], report["cap"], report["what"]
+    count, largest = report["count"], report["largest"]
     if report["ok"]:
-        print(f"handbook maps fit: {size:,} of {cap:,} bytes at step {rung} of 5 ({what}), "
-              f"{cap - size:,} bytes to spare.")
+        room = (MAP_PARTS - count) * cap + cap - _size(report["parts"][-1])
+        print(f"handbook maps fit in {count} of {MAP_PARTS} parts at step {rung} of 5 ({what}); "
+              f"the largest part is {largest:,} of {cap:,} bytes, about {room:,} bytes to spare.")
         return 0
     if rung == TRIMMED:
-        print(f"handbook maps too big: even step 5 needs {size:,} of {cap:,} bytes, so {what}. "
-              "Retire or merge a row in where-truth-lives.md.")
+        print(f"handbook maps too big: even step 5 needs {size:,} bytes, more than {MAP_PARTS} "
+              f"parts of {cap:,} bytes hold, so {what}. Retire or merge a row in where-truth-lives.md.")
     else:
-        print(f"handbook maps too big: they fit only at step {rung} of 5 ({what}), {size:,} of "
-              f"{cap:,} bytes. Shorten or retire a row in where-truth-lives.md.")
+        print(f"handbook maps too big: they fit {MAP_PARTS} parts only at step {rung} of 5 ({what}). "
+              "Shorten or retire a row in where-truth-lives.md, or break up a line of its "
+              f"prose longer than {cap:,} bytes.")
     return 1
 
 
@@ -630,11 +765,7 @@ def main() -> int:
     if repo is None:
         return 0  # no handbook checkout here — stay silent
 
-    try:
-        ttl = int(os.environ.get("SCRIPTA_HOOK_TTL_MIN", "30"))
-    except ValueError:
-        ttl = 30
-    freshen(repo, ttl)
+    freshen(repo, hook_ttl_min())
 
     try:
         text = _pointer_text(repo)
@@ -667,4 +798,7 @@ if __name__ == "__main__":
         raise SystemExit(refresh_links(Path(sys.argv[2])))
     if len(sys.argv) >= 2 and sys.argv[1] == "--check-maps":
         raise SystemExit(check_maps_cli(sys.argv[2] if len(sys.argv) > 2 else "."))
+    if len(sys.argv) >= 3 and sys.argv[1] == "--freshen":
+        _pull(Path(sys.argv[2]))  # freshen_later already claimed the window
+        raise SystemExit(0)
     raise SystemExit(main())

@@ -69,10 +69,15 @@ Two hooks work together:
   strategy, org, how-we-work), and that it never outranks the current session's work,
   the code, or the user's own memory. It still runs the freshness `git pull` at most
   every 30 min (`SCRIPTA_HOOK_TTL_MIN`).
-- `hooks/load_scripta_on_prompt.py` (UserPromptSubmit) injects the full map pages
-  (`index.md` + `where-truth-lives.md`, ~2k tokens) only when the prompt looks like a
-  team-fact question, via a conservative trigger match checked before any file or git
-  access. Everything else passes through untouched.
+- `hooks/load_scripta_on_prompt.py` (UserPromptSubmit) injects the map pages
+  (`index.md` + `where-truth-lives.md`) only when the prompt looks like a team-fact
+  question, via a conservative trigger match checked before any file or git access.
+  Everything else passes through untouched. Claude Code moves a hook text over 10,000
+  characters to a file, so the maps travel in parts of at most 9,000 bytes: `hooks.json`
+  registers this hook three times (`--part 1` to `--part 3`), and each registration
+  sends one part. A small handbook is one part; a bigger one uses more, so every
+  registry row still arrives. The freshness pull here runs after the read, in the
+  background, so it shows from the next prompt on.
 
 The session-start hook also warns about dead links. When a link in `where-truth-lives.md`
 did not open for you, because it is gone or you have no access, the session gets one line
