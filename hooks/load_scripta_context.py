@@ -507,9 +507,9 @@ def _size(text: str) -> int:
     return len(text.encode("utf-8"))
 
 
-def _position_line(k: int, count: int) -> str:
-    return (f"[scripta: handbook maps, part {k} of {count}; if a part is missing, "
-            "read where-truth-lives.md from the checkout]")
+def _position_line(k: int, count: int, version: str) -> str:
+    return (f"[scripta: handbook maps, part {k} of {count}, version {version}; if a part "
+            "is missing or the versions differ, read where-truth-lives.md from the checkout]")
 
 
 def _table_span(lines: list[str]) -> tuple[int, int] | None:
@@ -528,10 +528,11 @@ def split_into_parts(body: str, count: int) -> list[str] | None:
     """Split the payload between lines into at most `count` parts of MAX_BYTES each.
 
     A payload that fits one part goes out as it is. When it needs several, each
-    part opens with a line naming its position, so a part that did not arrive is
-    visible, and a part that starts inside the registry table repeats the table's
-    head, so its rows still read as a table. Returns None when the payload needs
-    more parts than `count`, or holds a single line longer than a part.
+    part opens with a line naming its position and a short version of the whole
+    payload, so a part that did not arrive, or parts built from two versions of the
+    pages, are visible. A part that starts inside the registry table repeats the
+    table's head, so its rows still read as a table. Returns None when the payload
+    needs more parts than `count`, or holds a single line longer than a part.
     """
     if _size(body) <= MAX_BYTES:
         return [body]
@@ -539,14 +540,16 @@ def split_into_parts(body: str, count: int) -> list[str] | None:
         return None
     lines = body.split("\n")
     span = _table_span(lines)
+    version = hashlib.sha256(body.encode("utf-8")).hexdigest()[:8]
     parts: list[str] = []
     start = 0
     while start < len(lines):
         if len(parts) == count:
             return None
-        prefix = [_position_line(len(parts) + 1, count)]
-        if span and span[0] + 1 < start < span[1]:
-            prefix += lines[span[0]:span[0] + 2]
+        prefix = [_position_line(len(parts) + 1, count, version)]
+        if span and span[0] < start < span[1]:
+            # Repeat the head row, and the separator unless this part starts on it.
+            prefix += lines[span[0]:min(start, span[0] + 2)]
         size, end = _size("\n".join(prefix)), start
         while end < len(lines) and size + _size(lines[end]) + 1 <= MAX_BYTES:
             size += _size(lines[end]) + 1

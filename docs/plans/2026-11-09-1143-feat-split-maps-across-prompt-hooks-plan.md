@@ -39,7 +39,7 @@ Claude Code measures each hook's text on its own, even when several hooks run fo
 - R1. Every registry row and the registry page's rules reach the session whole while that content fits in `MAP_PARTS` parts of at most `MAX_BYTES` each.
 - R2. A session receives no more parts than the payload needs: the fewest parts that carry R1, and within that count the most complete rung of the existing size ladder.
 - R3. All parts a session receives in one prompt come from the same version of `index.md` and `where-truth-lives.md`.
-- R4. Each part names its position (part k of M), so a part that failed to arrive is visible to the model instead of silently missing rows.
+- R4. When the maps need more than one part, each part names its position (part k of M) and a short version of the whole payload, so a part that failed to arrive, or parts built from two versions of the pages, are visible to the model instead of silently missing or repeating rows.
 
 **The size check**
 
@@ -70,7 +70,7 @@ Claude Code measures each hook's text on its own, even when several hooks run fo
 - KTD1. **Fixed registrations, one constant.** `MAP_PARTS = 3` lives in `hooks/load_scripta_context.py`, and `hooks/hooks.json` carries exactly `MAP_PARTS` UserPromptSubmit entries passing `--part 1` to `--part 3`. A test keeps the two in step. Claude Code has no way for one hook command to emit several texts, so the count has to be static. Adding a fourth part later is one entry plus the constant.
 - KTD2. **Each part rebuilds and slices.** Every invocation builds the full payload with the existing ladder, then splits it greedily on line boundaries into chunks of at most `MAX_BYTES`. Lines are table rows, so a row is never cut. The split is deterministic, so the same files give the same slices in every process.
 - KTD3. **Fewest parts first, then the best rung.** The ladder now asks, for part counts 1 to `MAP_PARTS`, which is the first count where some rung up to 4 fits, and within that count picks the lowest rung that fits (R2). If no count holds rung 4, rung 5 is tried in `MAP_PARTS` parts, then the existing tail cut on the last part. This keeps today's one-part payload and grows the text a session gets only as the registry grows.
-- KTD4. **Who carries what.** Part 1 carries the existing lead line, the handbook header and, when not ok, the `systemMessage` to the person. The last part carries the rung's note. Every part opens with one line naming part k of M and saying to read `where-truth-lives.md` if a part is missing. A part that starts inside the registry table repeats the table's header and separator rows. A part whose k is above M prints nothing.
+- KTD4. **Who carries what.** Part 1 carries the existing lead line, the handbook header and, when not ok, the `systemMessage` to the person. The last part carries the rung's note. When the payload needs more than one part, every part opens with one line naming part k of M and an 8-character hash of the unsplit payload, and saying to read `where-truth-lives.md` if a part is missing or the versions differ. A single part carries no such line, since nothing can go missing from it. A part that starts inside the registry table repeats the table's header row, and the separator unless the part starts on it. A part whose k is above M prints nothing.
 - KTD5. **The pull moves after the read, in the background.** Today the prompt hook runs `freshen()` (a `git pull` of up to 15 s) before reading. With several parts that would let part 1 read the new files while the others read the old ones. Now no part pulls before reading; part 1, after printing, starts a detached `--freshen <repo>` run when the TTL has expired, using the same detached-spawn pattern as `maybe_refresh_links()`. The pull lands for the next prompt. The first team-fact prompt after the TTL may therefore see maps up to one TTL old, which the SessionStart pull already bounds at session start. This closes the race between the parts of one prompt (R3) and also takes the pull off the prompt's critical path.
 
 ### High-Level Technical Design
@@ -117,7 +117,7 @@ sequenceDiagram
   4. Update `check_maps_cli` messages to name parts used, largest part and rung (R5).
 - **Patterns to follow:** the existing ladder and its `RUNG_NAMES`; `CheckMapsCli` and `MapsReport` tests.
 - **Test scenarios:**
-  - A small handbook gives one part at rung 1 with "part 1 of 1".
+  - A small handbook gives one part at rung 1 with no position line.
   - A registry that fits one part only at rung 4 still gives one part at rung 4, not two parts at a better rung.
   - A registry too big for one part at rung 4 gives two parts, and every fact cell appears exactly once across them.
   - A registry needing three parts gives three, and every part is at most `MAX_BYTES` bytes.

@@ -442,6 +442,34 @@ class MapsParts(unittest.TestCase):
         self.assertEqual(second[1:3], TABLE_HEAD)
         self.assertTrue(second[3].startswith("| fact "))
 
+    def test_a_part_that_starts_on_the_separator_repeats_only_the_head(self):
+        from load_scripta_context import _position_line, split_into_parts
+        head, sep = TABLE_HEAD
+        line = len(_position_line(1, 2, "0" * 8).encode("utf-8"))
+        # A first line sized so part 1 ends right after the head row.
+        filler = "x" * (MAX_BYTES - line - len(head) - 2)
+        body = "\n".join([filler, head, sep] + [f"| fact {i} | `h{i}.md` |" for i in range(40)])
+        first, second = split_into_parts(body, 3)
+        self.assertTrue(first.endswith(head))
+        lines = second.split("\n")
+        self.assertEqual(lines[1:3], [head, sep], "the head comes back once, then the part's own separator")
+        self.assertEqual(lines[3], "| fact 0 | `h0.md` |")
+
+    def test_every_part_carries_one_version_that_a_page_change_moves(self):
+        import re, tempfile
+        from load_scripta_context import maps_payload_report
+        version = re.compile(r"^\[scripta: handbook maps, part \d of \d, version ([0-9a-f]{8});")
+        with tempfile.TemporaryDirectory() as d:
+            repo = _handbook(Path(d), 500)
+            before = {version.match(p).group(1) for p in maps_payload_report(repo)["parts"]}
+            page = repo / "where-truth-lives.md"
+            page.write_text(page.read_text(encoding="utf-8").replace("| fact 7 |", "| fact seven |"),
+                            encoding="utf-8")
+            after = {version.match(p).group(1) for p in maps_payload_report(repo)["parts"]}
+        self.assertEqual(len(before), 1, "all parts of one build share a version")
+        self.assertEqual(len(after), 1)
+        self.assertNotEqual(before, after, "a changed page gives a new version")
+
     def test_a_line_longer_than_a_part_falls_to_rung_5(self):
         r = self._report(150, prose="## The rule\n\n" + "word " * 2000)
         self.assertEqual(r["rung"], 5)
