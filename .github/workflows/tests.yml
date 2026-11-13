@@ -53,6 +53,10 @@ jobs:
       - name: Noon schedule tests
         working-directory: skills/daily-digest/scripts
         run: python3 -m unittest -v test_digest_schedule
+      # The missed-summaries check runs in the handbook's scheduled job, so its tests run here too.
+      - name: Missed summaries tests
+        working-directory: skills/daily-digest/scripts
+        run: python3 -m unittest -v test_missed_summaries
       # The hooks, and the link check they start, run under it too.
       - name: Hook and reference check tests on 3.9
         run: |

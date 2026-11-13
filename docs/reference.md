@@ -46,6 +46,53 @@ one is installed, and do a short check of their own when none is. (At the Hub, i
 daily-digest pulls transcripts of meetings you attended, by itself. Without it, hand the
 skill a transcript file or paste text — same result, one manual step more.
 
+**A check for calls with no summary.** One day's digest PR holds every call of that
+day, so a day where one call was summarized looks done even when another call has no
+summary. `skills/daily-digest/scripts/missed_summaries.py` names each call with no
+summary over the last 5 weekdays. A call counts as summarized when its block is in the
+week's update, a decision's `## Source` names it, or a digest PR lists it under
+`## Meetings`. List the calls in the handbook's `scripta.json`:
+
+```json
+{ "digest": { "calls": [
+  { "title": "Team - Daily", "days": "tue-fri", "owner": "gh-login", "backup": "gh-login" },
+  { "title": "Team - Planning", "days": "mon", "owner": "gh-login" }
+] } }
+```
+
+`title` is the call's Zoom title, `days` uses the noon schedule's format, and `owner` and
+`backup` are GitHub logins, mentioned next to a missing call. Run it from a handbook
+checkout to see the list. To run it every weekday morning, add a workflow to the handbook
+repo. With `--issue` it opens one "Call summaries missing" issue there, comments on it
+each morning while a call is missing, and closes it once none is:
+
+```yaml
+on:
+  schedule:
+    - cron: '0 7 * * 1-5'
+  workflow_dispatch:
+permissions:
+  contents: read
+  pull-requests: read
+  issues: write
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/checkout@v4
+        with:
+          repository: team-blue-Hub/scripta
+          path: .scripta
+      - run: python3 .scripta/skills/daily-digest/scripts/missed_summaries.py --issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+```
+
+The check has no Zoom access, so a holiday or a cancelled call shows up as missing too.
+
 ## Zoom troubleshooting (read before your first digest)
 
 1. **"No permission" on transcript/summary of a meeting you attended** — the host's

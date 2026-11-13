@@ -26,7 +26,7 @@ The acquisition discipline of fetching assets for a meeting that was already dig
 The opt-in launchd job that opens the daily digest in a visible Terminal window at 12:00 on weekdays, for the meetings one person attends, unless all of them are already in today's digest. A person still runs and triages the digest in that window; the digest's steps do not change.
 
 ### Handbook settings
-`scripta.json` at the root of a handbook: what that handbook is connected to, committed with it so it is the same for everyone on the team. Today it holds `linear` (workspace, team and label) for the daily digest's task and status lanes, and `weekly` (`enabled`) for its weekly lane. Where the handbook sits on one machine is not in it: that is `handbook_path` in `~/.config/scripta/config.json`.
+`scripta.json` at the root of a handbook: what that handbook is connected to, committed with it so it is the same for everyone on the team. Today it holds `linear` (workspace, team and label) for the daily digest's task and status lanes, `weekly` (`enabled`) for its weekly lane, and `digest` (`calls`) for the check that names calls with no summary. Where the handbook sits on one machine is not in it: that is `handbook_path` in `~/.config/scripta/config.json`.
 
 ## Handbook curation
 
