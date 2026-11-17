@@ -200,11 +200,31 @@ Calibration: a typical 2-hour demo+planning yields roughly 8–12 candidate deci
 Zero found in a long meeting means you missed some; twenty means you're counting
 status updates. When unsure, tag `weak` rather than dropping or promoting.
 
-Known triage-mortality classes: deploy/timing calls ("ship tomorrow morning", "campaign runs until
-Sunday"), one person's stated intent ("I want to use this for every test"), and pure
-tasks — even firm ones — rarely or never survive triage. List them under Tasks or Open
-questions instead of Candidate decisions, or tag them `weak` and say you expect them
-to die.
+**Before a candidate goes under Candidate decisions, ask: would a future team member, or a
+Claude session, act wrongly if it were not on record?** If not, it is not a decision for
+the log, however firmly the call agreed it. List it under Tasks or Open questions instead.
+
+Known triage-mortality classes rarely or never survive triage, even when firm:
+
+- deploy, timing and one-off release calls ("ship tomorrow morning", "campaign runs until
+  Sunday", "hold these fixes for the next release");
+- one person's stated intent ("I want to use this for every test");
+- pure tasks;
+- visual and layout choices (a colour, a spacing, where a panel sits): the design file is
+  their home, not the decision log;
+- period-bound constraints ("not this quarter", "until the launch"): they expire, and an
+  ADR would be read later as a standing rule;
+- priority and ordering ("X comes after Y", "this one goes last"): the ticket order holds
+  them, and the next planning changes them.
+
+List these under Tasks or Open questions, never under Candidate decisions. Only when you
+cannot tell whether a call belongs to one of these classes, keep it as a candidate tagged
+`weak` and name the class you suspect, so triage can kill it in one click.
+
+A call in one of these classes can carry a lasting rule inside it, such as an ordering call
+that also says "a customer's password never goes into a ticket". Keep the rule and drop
+the call: make the candidate the rule alone and tag it `page-line`, so Step 4 adds it to
+its owning page and writes no ADR for it.
 
 **Check each candidate against what is already recorded, before triage.** Find the
 candidate's owning page through `where-truth-lives.md`, then grep that page and
@@ -355,6 +375,10 @@ instead of a filing cabinet). For each confirmed decision:
   and the meeting changes nothing about it (value, scope, owner or reason), write no ADR
   and leave the page alone. Name it in the PR body as `duplicate: <path>`. A second record
   of one rule gives the next correction two places to miss.
+- **A `page-line` candidate gets no ADR either.** It is a lasting rule taken out of a call
+  that stays out of the log (Step 2). Add it as one dated line ("as of YYYY-MM-DD") on its
+  owning page in the SAME PR, tag the page's `owner:` as a reviewer, and name it in the PR
+  body as `page line: <path>`. If no page owns it, the no-owner question above applies.
 - If genuinely nothing existing is affected, say so in the PR body ("reconcile pass: no
   conflicts") — the reviewer should know the check happened, not assume it.
 
