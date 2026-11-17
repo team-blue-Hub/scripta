@@ -196,7 +196,8 @@ Produce a markdown digest with exactly these sections:
 4. **Tasks** — per person: what, any deadline mentioned, timestamp.
 5. **Open questions** — raised but unresolved.
 
-Calibration: a typical 2-hour demo+planning yields roughly 8–12 candidate decisions.
+Calibration: a typical 2-hour demo+planning yields roughly 8–12 candidate decisions before
+the classes below are set aside, often fewer after; never promote one of them to reach a count.
 Zero found in a long meeting means you missed some; twenty means you're counting
 status updates. When unsure, tag `weak` rather than dropping or promoting.
 
@@ -378,7 +379,8 @@ instead of a filing cabinet). For each confirmed decision:
 - **A `page-line` candidate gets no ADR either.** It is a lasting rule taken out of a call
   that stays out of the log (Step 2). Add it as one dated line ("as of YYYY-MM-DD") on its
   owning page in the SAME PR, tag the page's `owner:` as a reviewer, and name it in the PR
-  body as `page line: <path>`. If no page owns it, the no-owner question above applies.
+  body as `page line: <path>`. If no page owns it, the no-owner question above applies; on
+  FLAG-ONLY, write the rule as an ordinary ADR instead, so it is recorded somewhere.
 - If genuinely nothing existing is affected, say so in the PR body ("reconcile pass: no
   conflicts") — the reviewer should know the check happened, not assume it.
 
