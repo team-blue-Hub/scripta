@@ -187,6 +187,10 @@ durable URL after all, the page is one copy away from the normal flow.
    `~/.claude/.tb-prototypes/<name>` (shallow clone is fine; this cache dir,
    previews included, is the skill's only workspace).
 2. Copy the preview folder into the clone unchanged, under its existing name.
+   If the folder has no `README.md`, add one: the page's `<title>` as the
+   heading, then `Live page: https://<org>.github.io/<name>/<folder>/`, so the
+   folder links to its page when browsed on GitHub. Never overwrite an existing
+   `README.md`; it may be a teammate's note.
    Branch (`prototype/<slug>`), add the folder, commit (`prototype: <slug>`),
    push the branch, open a PR with a one-paragraph body: what the page is for
    and the Pages URL it will get. The PR is the share point and the paper
@@ -203,7 +207,10 @@ durable URL after all, the page is one copy away from the normal flow.
 After publishing, "change the button", "make it dark" → edit the SAME folder in
 the clone (new PR or push to the open one), not the old preview folder, which
 is no longer the copy to edit; the URL stays stable. Preview the edit from the
-clone before pushing it, as in Step 3. A build-in-place page is edited in
+clone before pushing it, as in Step 3. If the edit changes the page's
+`<title>` and the folder's `README.md` heading is still the old title, change
+the heading to the new one; a `README.md` with any other heading is a
+teammate's note, so leave it. A build-in-place page is edited in
 place the same way, at the path it already has. A genuinely different idea
 gets a new folder. Never edit someone else's folder unless the user
 explicitly asks.
