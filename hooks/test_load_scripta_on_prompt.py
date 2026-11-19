@@ -71,34 +71,115 @@ class NegativeTriggers(unittest.TestCase):
         self.assertFalse(is_team_fact_prompt("plot the four points in each quadrant"))
 
 
+def _handbook(tmp: Path, rows: int) -> Path:
+    body = "\n".join(f"| fact {i} | [h{i}](h{i}.md) |" for i in range(rows))
+    (tmp / "index.md").write_text("# Index\n", encoding="utf-8")
+    (tmp / "where-truth-lives.md").write_text(
+        "| The fact | Home |\n|---|---|\n" + body + "\n", encoding="utf-8")
+    return tmp
+
+
+def _run(repo: Path, argv=(), prompt="where does x live", freshen_later=None):
+    """Run the hook once, as Claude Code would run one of its registrations."""
+    import io, json
+    from unittest import mock
+    import load_scripta_on_prompt as hook
+    out = io.StringIO()
+    later = freshen_later or mock.Mock()
+    with mock.patch.object(hook, "locate_repo", return_value=repo) as locate, \
+         mock.patch.object(hook, "freshen_later", later), \
+         mock.patch("sys.argv", ["load_scripta_on_prompt.py", *argv]), \
+         mock.patch("sys.stdin", io.StringIO(json.dumps({"prompt": prompt}))), \
+         mock.patch("sys.stdout", out):
+        hook.main()
+    text = out.getvalue()
+    return (json.loads(text) if text else None), later, locate
+
+
 class WarnsThePerson(unittest.TestCase):
     """The prompt hook tells the person, not only the model, when maps are cut."""
 
     def _main_output(self, rows):
-        import io, json, tempfile
-        from unittest import mock
-        import load_scripta_on_prompt as hook
+        import tempfile
         with tempfile.TemporaryDirectory() as d:
-            tmp = Path(d)
-            body = "\n".join(f"| fact {i} | [h{i}](h{i}.md) |" for i in range(rows))
-            (tmp / "index.md").write_text("# Index\n", encoding="utf-8")
-            (tmp / "where-truth-lives.md").write_text(
-                "| The fact | Home |\n|---|---|\n" + body + "\n", encoding="utf-8")
-            out = io.StringIO()
-            with mock.patch.object(hook, "locate_repo", return_value=tmp), \
-                 mock.patch.object(hook, "freshen"), \
-                 mock.patch("sys.stdin", io.StringIO(json.dumps({"prompt": "where does x live"}))), \
-                 mock.patch("sys.stdout", out):
-                hook.main()
-            return json.loads(out.getvalue())
+            return _run(_handbook(Path(d), rows))[0]
 
     def test_whole_maps_carry_no_warning(self):
         self.assertNotIn("systemMessage", self._main_output(5))
 
     def test_cut_maps_warn_the_person(self):
-        out = self._main_output(600)
+        out = self._main_output(1400)
         self.assertIn("no longer fit", out["systemMessage"])
         self.assertIn("additionalContext", out["hookSpecificOutput"], "the maps still arrive")
+
+
+class SendsOnePart(unittest.TestCase):
+    """Each registration of the hook sends one slice of the same maps."""
+
+    LEAD = "Consult the team handbook below"
+
+    def _context(self, out):
+        return out["hookSpecificOutput"]["additionalContext"]
+
+    def test_each_part_sends_its_own_slice(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            repo = _handbook(Path(d), 500)
+            first, second, third = (_run(repo, ["--part", str(k)])[0] for k in (1, 2, 3))
+        self.assertTrue(self._context(first).startswith(self.LEAD))
+        self.assertIn("part 1 of 2", self._context(first))
+        self.assertIn("part 2 of 2", self._context(second))
+        self.assertNotIn(self.LEAD, self._context(second))
+        self.assertIsNone(third, "a part past the payload sends nothing")
+
+    def test_only_part_one_warns_the_person(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            repo = _handbook(Path(d), 1400)
+            first, second = (_run(repo, ["--part", str(k)])[0] for k in (1, 2))
+        self.assertIn("systemMessage", first)
+        self.assertNotIn("systemMessage", second)
+
+    def test_a_prompt_that_is_not_a_team_fact_sends_and_reads_nothing(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            for k in (1, 2, 3):
+                out, later, locate = _run(_handbook(Path(d), 500), ["--part", str(k)],
+                                          prompt="run the tests")
+                self.assertIsNone(out)
+                locate.assert_not_called()
+                later.assert_not_called()
+
+    def test_the_pull_lands_for_the_next_prompt(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            repo = _handbook(Path(d), 5)
+            page = repo / "where-truth-lives.md"
+
+            def pull(*_):
+                page.write_text(page.read_text(encoding="utf-8") + "| late fact | [l](l.md) |\n",
+                                encoding="utf-8")
+
+            from unittest import mock
+            out, later, _ = _run(repo, ["--part", "1"], freshen_later=mock.Mock(side_effect=pull))
+            later.assert_called_once()
+            self.assertNotIn("late fact", self._context(out), "this prompt reads before the pull")
+            out, _, _ = _run(repo, ["--part", "1"])
+            self.assertIn("late fact", self._context(out), "the next prompt sees it")
+
+    def test_only_part_one_starts_the_pull(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            repo = _handbook(Path(d), 500)
+            for k in (2, 3):
+                _run(repo, ["--part", str(k)])[1].assert_not_called()
+
+    def test_a_malformed_part_is_part_one(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            repo = _handbook(Path(d), 5)
+            for argv in ([], ["--part"], ["--part", "x"], ["--part", "0"]):
+                self.assertTrue(self._context(_run(repo, argv)[0]).startswith(self.LEAD))
 
 
 if __name__ == "__main__":

@@ -11,8 +11,15 @@ only on prompts that match the triggers below.
 
 Fast path matters: the common case is no match, and that must stay cheap. The
 trigger check is a single regex pass over the prompt text, done BEFORE any file
-read or subprocess call. Only a match proceeds to locate the repo, freshen it,
-and read the map pages.
+read or subprocess call. Only a match proceeds to locate the repo and read the
+map pages.
+
+Parts: Claude Code caps each hook's text on its own, so hooks.json registers this
+hook several times, `--part 1` to `--part N`. Every registration builds the same
+maps and sends only its own slice; a part past what the maps need sends nothing.
+Part 1 carries the lead line and the warning to the person, and, after sending,
+starts the freshness pull in the background, so all parts of one prompt read the
+same pages and the pull lands for the next prompt.
 
 Never crashes a prompt: every step is wrapped so a malformed hook payload, a
 missing repo, or an unreadable page all fall through to "output nothing, exit 0"
@@ -21,13 +28,12 @@ missing repo, or an unreadable page all fall through to "output nothing, exit 0"
 from __future__ import annotations
 
 import json
-import os
 import re
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
-from load_scripta_context import freshen, locate_repo, maps_payload_report
+from load_scripta_context import freshen_later, hook_ttl_min, locate_repo, maps_payload_report
 
 # Starter set of word/phrase triggers that suggest the prompt is asking about
 # a team fact rather than the code or the live session. Tune it to your team. Deliberately broad on a few entries ("where do",
@@ -66,7 +72,16 @@ def _lead_line() -> str:
     )
 
 
+def _part(argv: list[str]) -> int:
+    try:
+        k = int(argv[argv.index("--part") + 1])
+    except (ValueError, IndexError):
+        return 1
+    return k if k >= 1 else 1
+
+
 def main() -> int:
+    part = _part(sys.argv[1:])
     try:
         raw = sys.stdin.read()
     except Exception:
@@ -90,30 +105,29 @@ def main() -> int:
         if repo is None:
             return 0  # no handbook checkout here — stay silent
 
-        try:
-            ttl = int(os.environ.get("SCRIPTA_HOOK_TTL_MIN", "30"))
-        except ValueError:
-            ttl = 30
-        freshen(repo, ttl)
-
         report = maps_payload_report(repo)
         if report is None:
             return 0
 
-        out = {"hookSpecificOutput": {
-            "hookEventName": "UserPromptSubmit",
-            "additionalContext": _lead_line() + report["body"],
-        }}
-        # Said to the person, not only to the model. The notice inside the
-        # payload reaches only the model, which has no reason to raise it.
-        # A person who sees this can open the one-line PR that fixes it.
-        if not report["ok"]:
-            out["systemMessage"] = (
-                "scripta: the handbook maps no longer fit what a session receives "
-                f"({report['what']}). Shorten or retire a row in where-truth-lives.md; "
-                "`python3 hooks/load_scripta_context.py --check-maps <handbook>` "
-                "shows by how much.")
-        json.dump(out, sys.stdout)
+        if part <= report["count"]:
+            text = report["parts"][part - 1]
+            out = {"hookSpecificOutput": {
+                "hookEventName": "UserPromptSubmit",
+                "additionalContext": _lead_line() + text if part == 1 else text,
+            }}
+            # Said to the person, not only to the model, and once, by part 1. The
+            # notice inside the payload reaches only the model, which has no reason
+            # to raise it. A person who sees this can open the PR that fixes it.
+            if part == 1 and not report["ok"]:
+                out["systemMessage"] = (
+                    "scripta: the handbook maps no longer fit what a session receives "
+                    f"({report['what']}). Shorten or retire a row in where-truth-lives.md; "
+                    "`python3 hooks/load_scripta_context.py --check-maps <handbook>` "
+                    "shows by how much.")
+            json.dump(out, sys.stdout)
+            sys.stdout.flush()
+        if part == 1:
+            freshen_later(repo, hook_ttl_min())
     except Exception:
         return 0  # a malformed/unreadable map page must never crash the prompt
     return 0

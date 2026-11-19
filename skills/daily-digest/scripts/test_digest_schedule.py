@@ -4,9 +4,14 @@
 Stdlib unittest only. Every outside call goes through the seam in
 digest_schedule (run_cmd, which_on, clock, stdin_is_tty, ask); here a fake
 `World` replaces it, so nothing reaches the real launchd, Terminal, git remote
-or GitHub, and each test runs under its own temp HOME. The one place real
+or GitHub, and each test runs under its own temp home folder (see home_env). The one place real
 processes run is on purpose: the loader string and the window command are
 executed with `python3 -c` and `sh -c` against fake tools in a temp folder.
+
+Each test picks its OS: Base patches is_windows() to False and Windows patches
+it to True, so a Mac test takes the Mac path even when the suite runs on
+Windows. The few Mac tests that cannot run on a Windows host (sh, a ':' PATH)
+are skipped there.
 
 Run: cd skills/daily-digest/scripts && python3 -m unittest -v test_digest_schedule
 """
@@ -31,6 +36,12 @@ sys.path.insert(0, str(Path(__file__).parent))
 import digest_schedule as ds  # noqa: E402
 
 HOOK = Path(__file__).resolve().parents[3] / "hooks" / "load_scripta_context.py"
+
+
+def skip_on_windows(why):
+    """For a Mac test that cannot run on a Windows host at all."""
+    return unittest.skipIf(os.name == "nt", why)
+
 
 DAILY_SQ2 = "Hub - Daily - Sq2"
 DAILY_ALL = "Hub - Daily - All"
@@ -207,6 +218,16 @@ class World(object):
 
 
 
+def home_env(path):
+    """The env that points the home folder at path, on every OS.
+
+    Path.home() reads HOME on macOS and Linux but USERPROFILE on Windows, so a
+    test that set HOME alone wrote state.json and window-*.command files into
+    the real home folder of whoever ran the suite on Windows.
+    """
+    return {"HOME": str(path), "USERPROFILE": str(path)}
+
+
 class Base(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -214,13 +235,16 @@ class Base(unittest.TestCase):
         self.home = Path(self.tmp.name).resolve() / "home"
         self.home.mkdir()
         self.world = World(self.home)
-        env = {"HOME": str(self.home), "PATH": "/fake/bin:/usr/bin"}
+        env = {**home_env(self.home), "PATH": "/fake/bin:/usr/bin"}
         p = mock.patch.dict(os.environ, env)
         p.start()
         self.addCleanup(p.stop)
         for k in ("SCRIPTA_HANDBOOK_PATH", "CLAUDE_CONFIG_DIR"):
             os.environ.pop(k, None)
-        for name, fn in (("run_cmd", self.world.run_cmd), ("which_on", self.world.which_on),
+        # Fail here, before any write, if the temp home did not take on this OS.
+        self.assertEqual(ds.home(), self.home, "the tests would write into the real home folder")
+        for name, fn in (("is_windows", lambda: False),
+                         ("run_cmd", self.world.run_cmd), ("which_on", self.world.which_on),
                          ("stdin_is_tty", lambda: False),
                          ("clock", lambda: dt.datetime(2026, 10, 14, 12, 0))):
             q = mock.patch.object(ds, name, fn)
@@ -577,11 +601,12 @@ class Window(Base):
                           'printf %s "${CLAUDE_CONFIG_DIR-unset}" > "$REC.cfg"\n')
         claude.chmod(0o755)
         rec = str(Path(out_dir) / "rec")
-        env = {"PATH": "%s:/usr/bin:/bin" % fake, "REC": rec, "HOME": str(self.home)}
+        env = {"PATH": "%s:/usr/bin:/bin" % fake, "REC": rec, **home_env(self.home)}
         subprocess.run(["sh", "-c", cmd], env=env, check=True)
         return (Path(rec + ".cwd").read_text().strip(), Path(rec + ".arg").read_text(),
                 Path(rec + ".cfg").read_text())
 
+    @skip_on_windows("runs sh, and a file name cannot hold a double quote")
     def test_a_handbook_path_with_a_space_and_a_quote_reaches_the_shell_as_one_path(self):
         weird = self.make_handbook(self.home / "PROJECTS" / "my hand's \"book\"")
         opened = self.open_with(weird)
@@ -602,6 +627,7 @@ class Window(Base):
         self.assertTrue(script.read_text(encoding="utf-8").startswith("#!/bin/bash\n"))
         self.assertFalse([a for a in self.world.osa() if any("do script" in x for x in a)])
 
+    @skip_on_windows("runs sh")
     def test_a_saved_claude_config_dir_is_exported(self):
         cmd = self.script_arg(self.open_with(self.handbook, config_dir="/Users/x/claude profile"))
         _, _, cfg = self.run_in_shell(cmd, self.tmp.name)
@@ -611,6 +637,7 @@ class Window(Base):
         cmd = self.script_arg(self.open_with(self.handbook))
         self.assertNotIn("CLAUDE_CONFIG_DIR", cmd)
 
+    @skip_on_windows("the Mac notice escapes the backslashes a Windows path has")
     def test_a_window_that_does_not_open_notifies_the_command_to_run_by_hand(self):
         self.world.window_fails = True
         self.set_state([])
@@ -690,9 +717,9 @@ class Install(Base):
         self.assertNotIn("CLAUDE_CONFIG_DIR", pl["EnvironmentVariables"])
         self.assertEqual(pl["ProgramArguments"][:3], ["/usr/bin/env", "python3", "-c"])
         self.assertEqual(pl["ProgramArguments"][3], ds.LOADER)
-        log = "%s/.scripta/digest-schedule/schedule.log" % h
+        log = str(self.home / ".scripta" / "digest-schedule" / "schedule.log")
         self.assertEqual((pl["StandardOutPath"], pl["StandardErrorPath"]), (log, log))
-        plist_path = "%s/Library/LaunchAgents/blue.team.scripta.digest.plist" % h
+        plist_path = str(self.home / "Library" / "LaunchAgents" / "blue.team.scripta.digest.plist")
         self.assertEqual(self.world.launchctl()[:2],
                          [["launchctl", "unload", plist_path], ["launchctl", "load", plist_path]])
         st = self.state()
@@ -1160,7 +1187,7 @@ class HandbookParity(unittest.TestCase):
         for setup in self.scenarios():
             with self.subTest(setup.__name__), tempfile.TemporaryDirectory() as t:
                 home = Path(t).resolve()
-                env = {"HOME": str(home)}
+                env = home_env(home)
                 setup(home, env)
                 with mock.patch.dict(os.environ, env), \
                         mock.patch.object(hook, "CONFIG_FILE", home / ".config" / "scripta" / "config.json"):
@@ -1178,7 +1205,7 @@ class Uninstall(Base):
         self.world.calls[:] = []
         code, _ = self.main("uninstall")
         self.assertEqual(code, 0)
-        plist_path = "%s/Library/LaunchAgents/blue.team.scripta.digest.plist" % self.home
+        plist_path = str(self.home / "Library" / "LaunchAgents" / "blue.team.scripta.digest.plist")
         self.assertEqual(self.world.launchctl(), [["launchctl", "unload", plist_path]])
         self.assertFalse(Path(plist_path).exists())
         self.assertEqual(log.read_text(), "earlier runs\n")
@@ -1205,6 +1232,7 @@ class Status(Base):
         self.assertIn("NOT loaded", first[1])
         self.assertIn("installed and loaded", first[2])
 
+    @skip_on_windows("the plist PATH is split on ':', which a drive letter breaks")
     def test_tools_are_looked_up_on_the_plists_path_not_the_shells(self):
         self.main("install")
         job_bin = "%s/.local/bin" % self.home
@@ -1217,6 +1245,7 @@ class Status(Base):
         self.assertIn("python3: not found on the job's PATH", out)
         self.assertTrue(all(p == self.plist()["EnvironmentVariables"]["PATH"] for _, p in self.world.which_paths))
 
+    @skip_on_windows("the plist PATH is split on ':', which a drive letter breaks")
     def test_status_shows_handbook_rule_python_version_scripta_version_and_last_run(self):
         os.environ["SCRIPTA_HANDBOOK_PATH"] = str(self.handbook)
         self.main("install")
@@ -1465,10 +1494,11 @@ class WindowsLoaderBranch(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.home = Path(self.tmp.name).resolve()
-        p = mock.patch.dict(os.environ, {"HOME": str(self.home)})
+        p = mock.patch.dict(os.environ, home_env(self.home))
         p.start()
         self.addCleanup(p.stop)
         os.environ.pop("CLAUDE_CONFIG_DIR", None)
+        self.assertEqual(Path.home(), self.home, "the tests would write into the real home folder")
 
     def exec_loader(self):
         calls = []
@@ -1490,7 +1520,9 @@ class WindowsLoaderBranch(unittest.TestCase):
         f.parent.mkdir(parents=True)
         f.write_text("")
         (argv, kw), = self.exec_loader()
-        self.assertEqual(argv[1:], [str(f), "run"])
+        # The loader joins a '/' path onto the cache folder, so compare as paths.
+        self.assertEqual(Path(argv[1]), f)
+        self.assertEqual(argv[2:], ["run"])
         self.assertEqual(kw["creationflags"], 0x08000000)
         self.assertEqual(kw["stderr"], subprocess.STDOUT)
         self.assertEqual(kw["stdout"].name, str(self.home / ".scripta" / "digest-schedule" / "schedule.log"))
@@ -1518,7 +1550,7 @@ class Loader(unittest.TestCase):
         osa.chmod(0o755)
         self.mark = self.root / "mark"
         self.osa_log = self.root / "osa.log"
-        self.env = {"HOME": str(self.home), "PATH": "%s:/usr/bin:/bin" % bin_dir,
+        self.env = {**home_env(self.home), "PATH": "%s:/usr/bin:/bin" % bin_dir,
                     "MARK": str(self.mark), "OSA_LOG": str(self.osa_log)}
 
     def plant(self, config_dir, version):
@@ -1543,6 +1575,7 @@ class Loader(unittest.TestCase):
         self.assertEqual(self.load(), 0)
         self.assertEqual(self.mark.read_text(), "0.13.0 run")
 
+    @skip_on_windows("the fake osascript is a shell script")
     def test_nothing_installed_notifies_and_exits_non_zero(self):
         self.assertNotEqual(self.load(), 0)
         self.assertFalse(self.mark.exists())

@@ -46,6 +46,53 @@ one is installed, and do a short check of their own when none is. (At the Hub, i
 daily-digest pulls transcripts of meetings you attended, by itself. Without it, hand the
 skill a transcript file or paste text — same result, one manual step more.
 
+**A check for calls with no summary.** One day's digest PR holds every call of that
+day, so a day where one call was summarized looks done even when another call has no
+summary. `skills/daily-digest/scripts/missed_summaries.py` names each call with no
+summary over the last 5 weekdays. A call counts as summarized when its block is in the
+week's update, a decision's `## Source` names it, or a digest PR lists it under
+`## Meetings`. List the calls in the handbook's `scripta.json`:
+
+```json
+{ "digest": { "calls": [
+  { "title": "Team - Daily", "days": "tue-fri", "owner": "gh-login", "backup": "gh-login" },
+  { "title": "Team - Planning", "days": "mon", "owner": "gh-login" }
+] } }
+```
+
+`title` is the call's Zoom title, `days` uses the noon schedule's format, and `owner` and
+`backup` are GitHub logins, mentioned next to a missing call. Run it from a handbook
+checkout to see the list. To run it every weekday morning, add a workflow to the handbook
+repo. With `--issue` it opens one "Call summaries missing" issue there, comments on it
+each morning while a call is missing, and closes it once none is:
+
+```yaml
+on:
+  schedule:
+    - cron: '0 7 * * 1-5'
+  workflow_dispatch:
+permissions:
+  contents: read
+  pull-requests: read
+  issues: write
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/checkout@v4
+        with:
+          repository: team-blue-Hub/scripta
+          path: .scripta
+      - run: python3 .scripta/skills/daily-digest/scripts/missed_summaries.py --issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+```
+
+The check has no Zoom access, so a holiday or a cancelled call shows up as missing too.
+
 ## Zoom troubleshooting (read before your first digest)
 
 1. **"No permission" on transcript/summary of a meeting you attended** — the host's
@@ -69,10 +116,24 @@ Two hooks work together:
   strategy, org, how-we-work), and that it never outranks the current session's work,
   the code, or the user's own memory. It still runs the freshness `git pull` at most
   every 30 min (`SCRIPTA_HOOK_TTL_MIN`).
-- `hooks/load_scripta_on_prompt.py` (UserPromptSubmit) injects the full map pages
-  (`index.md` + `where-truth-lives.md`, ~2k tokens) only when the prompt looks like a
-  team-fact question, via a conservative trigger match checked before any file or git
-  access. Everything else passes through untouched.
+- `hooks/load_scripta_on_prompt.py` (UserPromptSubmit) injects the map pages
+  (`index.md` + `where-truth-lives.md`) only when the prompt looks like a team-fact
+  question, via a conservative trigger match checked before any file or git access.
+  Everything else passes through untouched. Claude Code moves a hook text over 10,000
+  characters to a file, so the maps travel in parts of at most 9,000 bytes: `hooks.json`
+  registers this hook three times (`--part 1` to `--part 3`), and each registration
+  sends one part. A small handbook is one part; a bigger one uses more, so every
+  registry row still arrives. The freshness pull here runs after the read, in the
+  background, so it shows from the next prompt on.
+
+The session-start hook also warns about dead links. When a link in `where-truth-lives.md`
+did not open for you, because it is gone or you have no access, the session gets one line
+naming it, so it says it could not read that source instead of guessing. The check runs in
+the background at most once a day (`SCRIPTA_LINK_CHECK_HOURS`, default 24), with your own
+GitHub login, so session start stays instant. A check that cannot run, for example
+offline, keeps the last warning. The result is kept in the handbook
+checkout's `.git/`, so a checkout that is a git worktree gets no warning.
+`SCRIPTA_LINK_CHECK=0` turns it off.
 
 Handbook location defaults to `~/PROJECTS/hub-scripta-handbook`, falling back to
 `~/PROJECTS/scripta`. To point at a checkout elsewhere, set

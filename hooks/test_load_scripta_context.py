@@ -6,15 +6,26 @@ No framework, no fixtures — stdlib unittest only, same bar as the hook itself.
 """
 from __future__ import annotations
 
+import contextlib
+import hashlib
+import io
+import json
+import os
+import subprocess
 import sys
+import tempfile
+import time
 import unittest
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).parent))
 from load_scripta_context import (MAX_BYTES, REGISTRY_CELL_CAP, assemble_maps_payload,
                                   compact_index, compact_registry, index_pointer,
                                   registry_table_only, skeletal_index,
                                   strip_frontmatter)
+import load_scripta_context as hook
 
 
 class StripFrontmatter(unittest.TestCase):
@@ -284,16 +295,16 @@ class RungsFourAndFive(unittest.TestCase):
 class FallbackTrim(unittest.TestCase):
     def test_last_resort_has_single_clean_notice(self):
         import tempfile
-        # Registry so large even compacted rows overflow: forces the tail-trim.
-        rows = "\n".join(f"| fact {i} | [h{i}](h{i}.md) |" for i in range(400))
+        # Registry so large even compacted rows overflow every part: forces the tail-trim.
+        rows = "\n".join(f"| fact {i} | [h{i}](h{i}.md) |" for i in range(1400))
         with tempfile.TemporaryDirectory() as d:
             tmp = Path(d)
             (tmp / "index.md").write_text("# Index\n", encoding="utf-8")
             (tmp / "where-truth-lives.md").write_text(
                 "| The fact | Home |\n|---|---|\n" + rows + "\n", encoding="utf-8")
             body = assemble_maps_payload(tmp)
-            self.assertLessEqual(len(body.encode()), MAX_BYTES)
             self.assertIn("payload trimmed", body)
+            self.assertEqual(body.count("[scripta hook:"), 1)  # one notice, no rung note left behind
             self.assertNotIn("index descriptions dropped", body)  # rung-3 note not doubled
 
 
@@ -330,27 +341,152 @@ class MapsReport(unittest.TestCase):
     def test_fitting_only_by_dropping_the_page_rules_is_not_ok(self):
         import tempfile
         from load_scripta_context import maps_payload_report
-        # Rows that fit on their own, page prose that pushes rung 4 over the cap.
+        # Rows that fit on their own, and one page-prose line longer than a whole
+        # part, which no split between lines can carry.
         with tempfile.TemporaryDirectory() as d:
-            r = maps_payload_report(_handbook(Path(d), 150, prose="## The rule\n\n" + "word " * 1200))
+            r = maps_payload_report(_handbook(Path(d), 150, prose="## The rule\n\n" + "word " * 2000))
             self.assertEqual(r["rung"], 5)
             self.assertFalse(r["ok"])
 
     def test_a_cut_tail_is_not_ok_and_reports_what_it_needed(self):
         import tempfile
-        from load_scripta_context import TRIMMED, maps_payload_report
+        from load_scripta_context import MAP_PARTS, TRIMMED, maps_payload_report
         with tempfile.TemporaryDirectory() as d:
-            r = maps_payload_report(_handbook(Path(d), 600))
+            r = maps_payload_report(_handbook(Path(d), 1400))
             self.assertEqual(r["rung"], TRIMMED)
             self.assertFalse(r["ok"])
-            self.assertGreater(r["bytes"], MAX_BYTES, "the size is what the last rung wanted before the cut")
-            self.assertLessEqual(len(r["body"].encode()), MAX_BYTES, "the body itself is still cut to fit")
+            self.assertGreater(r["bytes"], MAP_PARTS * MAX_BYTES,
+                               "the size is what the last rung wanted before the cut")
+            self.assertLessEqual(len(r["body"].encode()), MAP_PARTS * MAX_BYTES,
+                                 "the body itself is still cut to fit")
 
     def test_no_map_pages_means_no_report(self):
         import tempfile
         from load_scripta_context import maps_payload_report
         with tempfile.TemporaryDirectory() as d:
             self.assertIsNone(maps_payload_report(Path(d)))
+
+
+TABLE_HEAD = ["| The fact | Home |", "|---|---|"]
+
+
+def _strip_part_prefix(part: str) -> str:
+    """A part's own lines, without the position line and a repeated table head."""
+    lines = part.split("\n")
+    if lines and lines[0].startswith("[scripta: handbook maps, part "):
+        lines = lines[1:]
+        if lines[:2] == TABLE_HEAD:
+            lines = lines[2:]
+    return "\n".join(lines)
+
+
+class MapsParts(unittest.TestCase):
+    """The maps travel in up to MAP_PARTS hook texts, each under MAX_BYTES.
+
+    Claude Code caps each hook text on its own, so a payload that outgrows one
+    text is split across several prompt-hook registrations instead of losing rows.
+    """
+
+    def _report(self, rows, prose=""):
+        import tempfile
+        from load_scripta_context import maps_payload_report
+        with tempfile.TemporaryDirectory() as d:
+            return maps_payload_report(_handbook(Path(d), rows, prose=prose))
+
+    def _facts(self, parts):
+        import re
+        return re.findall(r"\| (fact \d+) \|", "\n".join(parts))
+
+    def test_a_small_handbook_is_one_part_with_no_position_line(self):
+        r = self._report(5)
+        self.assertEqual(r["count"], 1)
+        self.assertEqual(r["rung"], 1)
+        self.assertEqual(r["parts"], [r["body"]])
+        self.assertNotIn("handbook maps, part", r["parts"][0])
+
+    def test_one_part_at_rung_4_beats_two_parts_at_a_better_rung(self):
+        import tempfile
+        from load_scripta_context import maps_payload_report
+        index = "# Index\n" + "\n".join(f"- [p{i}](p{i}.md) — d" for i in range(500)) + "\n"
+        with tempfile.TemporaryDirectory() as d:
+            tmp = _handbook(Path(d), 40)
+            (tmp / "index.md").write_text(index, encoding="utf-8")
+            r = maps_payload_report(tmp)
+        self.assertEqual((r["count"], r["rung"]), (1, 4))
+        self.assertTrue(r["ok"])
+
+    def test_too_big_for_one_part_becomes_two_with_every_row_once(self):
+        r = self._report(500)
+        self.assertEqual(r["count"], 2)
+        self.assertTrue(r["ok"])
+        self.assertEqual(self._facts(r["parts"]), [f"fact {i}" for i in range(500)])
+        self.assertTrue(r["parts"][0].startswith("[scripta: handbook maps, part 1 of 2"))
+        self.assertTrue(r["parts"][1].startswith("[scripta: handbook maps, part 2 of 2"))
+
+    def test_three_parts_each_under_the_cap(self):
+        r = self._report(900)
+        self.assertEqual(r["count"], 3)
+        self.assertTrue(r["ok"])
+        for part in r["parts"]:
+            self.assertLessEqual(len(part.encode("utf-8")), MAX_BYTES)
+        self.assertEqual(r["largest"], max(len(p.encode("utf-8")) for p in r["parts"]))
+        self.assertEqual(len(self._facts(r["parts"])), 900)
+
+    def test_no_row_is_cut_or_repeated(self):
+        r = self._report(900)
+        self.assertEqual("\n".join(_strip_part_prefix(p) for p in r["parts"]), r["body"])
+
+    def test_a_part_that_starts_in_the_table_repeats_its_head(self):
+        r = self._report(500)
+        second = r["parts"][1].split("\n")
+        self.assertEqual(second[1:3], TABLE_HEAD)
+        self.assertTrue(second[3].startswith("| fact "))
+
+    def test_a_part_that_starts_on_the_separator_repeats_only_the_head(self):
+        from load_scripta_context import _position_line, split_into_parts
+        head, sep = TABLE_HEAD
+        line = len(_position_line(1, 2, "0" * 8).encode("utf-8"))
+        # A first line sized so part 1 ends right after the head row.
+        filler = "x" * (MAX_BYTES - line - len(head) - 2)
+        body = "\n".join([filler, head, sep] + [f"| fact {i} | `h{i}.md` |" for i in range(40)])
+        first, second = split_into_parts(body, 3)
+        self.assertTrue(first.endswith(head))
+        lines = second.split("\n")
+        self.assertEqual(lines[1:3], [head, sep], "the head comes back once, then the part's own separator")
+        self.assertEqual(lines[3], "| fact 0 | `h0.md` |")
+
+    def test_every_part_carries_one_version_that_a_page_change_moves(self):
+        import re, tempfile
+        from load_scripta_context import maps_payload_report
+        version = re.compile(r"^\[scripta: handbook maps, part \d of \d, version ([0-9a-f]{8});")
+        with tempfile.TemporaryDirectory() as d:
+            repo = _handbook(Path(d), 500)
+            before = {version.match(p).group(1) for p in maps_payload_report(repo)["parts"]}
+            page = repo / "where-truth-lives.md"
+            page.write_text(page.read_text(encoding="utf-8").replace("| fact 7 |", "| fact seven |"),
+                            encoding="utf-8")
+            after = {version.match(p).group(1) for p in maps_payload_report(repo)["parts"]}
+        self.assertEqual(len(before), 1, "all parts of one build share a version")
+        self.assertEqual(len(after), 1)
+        self.assertNotEqual(before, after, "a changed page gives a new version")
+
+    def test_a_line_longer_than_a_part_falls_to_rung_5(self):
+        r = self._report(150, prose="## The rule\n\n" + "word " * 2000)
+        self.assertEqual(r["rung"], 5)
+        self.assertFalse(r["ok"])
+        self.assertEqual(len(self._facts(r["parts"])), 150)
+
+    def test_more_than_every_part_holds_cuts_the_tail_with_a_notice(self):
+        from load_scripta_context import MAP_PARTS, TRIMMED
+        r = self._report(1400)
+        self.assertEqual(r["rung"], TRIMMED)
+        self.assertFalse(r["ok"])
+        self.assertEqual(r["count"], MAP_PARTS)
+        self.assertGreater(r["bytes"], MAP_PARTS * MAX_BYTES)
+        for part in r["parts"]:
+            self.assertLessEqual(len(part.encode("utf-8")), MAX_BYTES)
+        self.assertIn("payload trimmed", r["parts"][-1])
+        self.assertEqual(r["body"].count("payload trimmed"), 1)
 
 
 class CheckMapsCli(unittest.TestCase):
@@ -366,9 +502,12 @@ class CheckMapsCli(unittest.TestCase):
         import tempfile
         with tempfile.TemporaryDirectory() as d:
             code, out = self._run(_handbook(Path(d), 5))
-            self.assertEqual(code, 0); self.assertIn("fit", out)
+            self.assertEqual(code, 0); self.assertIn("fit in 1 of 3 parts", out)
         with tempfile.TemporaryDirectory() as d:
-            code, out = self._run(_handbook(Path(d), 600))
+            code, out = self._run(_handbook(Path(d), 500))
+            self.assertEqual(code, 0); self.assertIn("fit in 2 of 3 parts", out)
+        with tempfile.TemporaryDirectory() as d:
+            code, out = self._run(_handbook(Path(d), 1400))
             self.assertEqual(code, 1); self.assertIn("too big", out); self.assertIn("never arrive", out)
         with tempfile.TemporaryDirectory() as d:
             code, _ = self._run(Path(d))
@@ -379,6 +518,20 @@ class GuardContract(unittest.TestCase):
     def test_max_bytes_is_under_offload_threshold(self):
         # Claude Code offloads hook output near 10KB; the guard must stay under.
         self.assertLess(MAX_BYTES, 10_000)
+
+    def test_part_one_with_its_lead_line_stays_under_the_offload_threshold(self):
+        from load_scripta_on_prompt import _lead_line
+        self.assertLess(len(_lead_line()) + MAX_BYTES, 10_000)
+
+    def test_hooks_json_registers_one_prompt_hook_per_part(self):
+        from load_scripta_context import MAP_PARTS
+        config = json.loads((Path(__file__).parent / "hooks.json").read_text(encoding="utf-8"))
+        commands = [h["command"] for entry in config["hooks"]["UserPromptSubmit"]
+                    for h in entry["hooks"]]
+        self.assertEqual(len(commands), MAP_PARTS)
+        for k, command in enumerate(commands, 1):
+            self.assertIn("load_scripta_on_prompt.py", command)
+            self.assertTrue(command.endswith(f"--part {k}"), command)
 
 
 SKILLS = Path(__file__).resolve().parent.parent / "skills"
@@ -508,6 +661,288 @@ class SkillsNameNoHubRepoOutsideTheFallbacks(unittest.TestCase):
         section = text[start:end]
         self.assertIn("`team-blue-Hub/hub-scripta-handbook`", section)
         self.assertIn("hub-scripta-handbook/blob/main/onboarding/setup.md", section)
+
+
+PAGE = "# Where\n\nhttps://github.com/a/b and https://notion.so/x and https://example.com/z\n"
+
+
+def make_repo(page: str = PAGE) -> Path:
+    d = Path(tempfile.mkdtemp())
+    (d / ".git").mkdir()
+    (d / "where-truth-lives.md").write_text(page, encoding="utf-8")
+    return d
+
+
+def write_cache(repo: Path, findings, age_h: float = 1, sha=None, status="checked") -> None:
+    when = datetime.now(timezone.utc) - timedelta(hours=age_h)
+    (repo / ".git" / "scripta-link-check.json").write_text(json.dumps({
+        "checked_at": when.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "page_sha256": sha or hashlib.sha256((repo / "where-truth-lives.md").read_bytes()).hexdigest(),
+        "status": status,
+        "findings": findings,
+    }))
+
+
+def finding(target, cls):
+    return {"target": target, "error_class": cls}
+
+
+class LinkWarning(unittest.TestCase):
+    def test_no_cache_means_no_line(self):
+        self.assertEqual(hook.link_warning(make_repo()), "")
+
+    def test_shows_no_access_and_gone(self):
+        repo = make_repo()
+        write_cache(repo, [finding("https://github.com/a/b", "no-access"),
+                           finding("https://notion.so/x", "gone")])
+        line = hook.link_warning(repo)
+        self.assertIn("did not open for you", line)
+        self.assertIn("https://github.com/a/b (no access)", line)
+        self.assertIn("https://notion.so/x (gone)", line)
+        self.assertIn("(checked %s)" % datetime.now(timezone.utc).strftime("%Y-%m-%d"), line)
+        self.assertIn("do not guess its content", line)
+
+    def test_other_classes_never_shown(self):
+        repo = make_repo()
+        write_cache(repo, [finding("https://github.com/a/b", c) for c in
+                           ("needs-agent-result", "sso-gated-no-allowlist", "unknown", "transient")])
+        self.assertEqual(hook.link_warning(repo), "")
+
+    def test_target_gone_from_page_is_dropped(self):
+        repo = make_repo()
+        write_cache(repo, [finding("https://removed.example/x", "gone"),
+                           finding("https://notion.so/x", "gone")])
+        line = hook.link_warning(repo)
+        self.assertNotIn("removed.example", line)
+        self.assertIn("https://notion.so/x", line)
+
+    def test_cap_of_five_with_more(self):
+        urls = ["https://example.com/%d" % i for i in range(8)]
+        repo = make_repo(" ".join(urls))
+        write_cache(repo, [finding(u, "gone") for u in urls])
+        line = hook.link_warning(repo)
+        self.assertIn("https://example.com/4 (gone)", line)
+        self.assertNotIn("https://example.com/5 (gone)", line)
+        self.assertIn("and 3 more", line)
+
+    def test_broken_cache_gives_empty_line(self):
+        repo = make_repo()
+        (repo / ".git" / "scripta-link-check.json").write_text("{not json")
+        self.assertEqual(hook.link_warning(repo), "")
+
+
+class MaybeRefresh(unittest.TestCase):
+    def spawn(self, repo, hours=24):
+        with mock.patch.object(hook.subprocess, "Popen") as popen:
+            hook.maybe_refresh_links(repo, hours)
+        return popen
+
+    def test_no_cache_spawns(self):
+        popen = self.spawn(make_repo())
+        popen.assert_called_once()
+        args, kw = popen.call_args
+        self.assertEqual(args[0][0], sys.executable)
+        self.assertEqual(args[0][2], "--refresh-links")
+        self.assertEqual(kw["stdin"], subprocess.DEVNULL)
+        self.assertEqual(kw["stdout"], subprocess.DEVNULL)
+        self.assertEqual(kw["stderr"], subprocess.DEVNULL)
+
+    def test_fresh_cache_spawns_nothing(self):
+        repo = make_repo()
+        write_cache(repo, [], age_h=1)
+        self.spawn(repo).assert_not_called()
+
+    def test_old_cache_spawns(self):
+        repo = make_repo()
+        write_cache(repo, [], age_h=30)
+        self.spawn(repo).assert_called_once()
+
+    def test_changed_page_spawns(self):
+        repo = make_repo()
+        write_cache(repo, [], age_h=1, sha="0" * 64)
+        self.spawn(repo).assert_called_once()
+
+    def test_young_lock_blocks_second_spawn(self):
+        repo = make_repo()
+        self.spawn(repo).assert_called_once()
+        self.spawn(repo).assert_not_called()
+
+    def test_old_lock_is_ignored(self):
+        repo = make_repo()
+        lock = repo / ".git" / "scripta-link-check.started"
+        lock.touch()
+        old = time.time() - 16 * 60
+        os.utime(lock, (old, old))
+        self.spawn(repo).assert_called_once()
+
+    def test_popen_raising_is_swallowed(self):
+        with mock.patch.object(hook.subprocess, "Popen", side_effect=OSError("no")):
+            hook.maybe_refresh_links(make_repo(), 24)
+
+    def test_posix_uses_new_session(self):
+        with mock.patch.object(hook, "_is_windows", return_value=False):
+            _, kw = self.spawn(make_repo()).call_args
+        self.assertTrue(kw["start_new_session"])
+        self.assertNotIn("creationflags", kw)
+
+    def test_windows_uses_creationflags(self):
+        with mock.patch.object(hook, "_is_windows", return_value=True):
+            _, kw = self.spawn(make_repo()).call_args
+        self.assertEqual(kw["creationflags"], 0x08000000 | 0x00000200)
+        self.assertNotIn("start_new_session", kw)
+
+
+class FreshenLater(unittest.TestCase):
+    """The prompt hook's pull runs after the read, detached, at most once per window."""
+
+    def spawn(self, repo, ttl=30):
+        with mock.patch.object(hook.subprocess, "Popen") as popen:
+            hook.freshen_later(repo, ttl)
+        return popen
+
+    def test_a_stale_window_starts_one_detached_pull(self):
+        repo = make_repo()
+        popen = self.spawn(repo)
+        popen.assert_called_once()
+        args, kw = popen.call_args
+        self.assertEqual(args[0][2:], ["--freshen", str(repo)])
+        self.assertEqual(kw["stdout"], subprocess.DEVNULL)
+
+    def test_a_fresh_window_starts_nothing(self):
+        repo = make_repo()
+        (repo / ".git" / hook.PULL_MARKER).touch()
+        self.spawn(repo).assert_not_called()
+
+    def test_the_window_is_claimed_before_the_pull_finishes(self):
+        repo = make_repo()
+        self.spawn(repo).assert_called_once()
+        self.spawn(repo).assert_not_called()
+
+    def test_popen_raising_is_swallowed(self):
+        with mock.patch.object(hook.subprocess, "Popen", side_effect=OSError("no")):
+            hook.freshen_later(make_repo(), 30)
+
+    def test_the_freshen_entry_point_never_fails(self):
+        with tempfile.TemporaryDirectory() as d:
+            done = subprocess.run([sys.executable, str(Path(hook.__file__)), "--freshen", d],
+                                  capture_output=True, timeout=30)
+        self.assertEqual(done.returncode, 0)
+
+
+class RefreshLinks(unittest.TestCase):
+    def cache(self, repo):
+        return json.loads((repo / ".git" / "scripta-link-check.json").read_text())
+
+    def run_refresh(self, repo, **fake):
+        with mock.patch.object(hook.subprocess, "run", **fake):
+            return hook.refresh_links(repo)
+
+    def test_findings_are_cached(self):
+        repo = make_repo()
+        out = json.dumps({"findings": [
+            {"target": "https://notion.so/x", "error_class": "no-access", "file": "w", "line": 3},
+        ]})
+        done = subprocess.CompletedProcess([], 1, stdout=out, stderr="")
+        self.assertEqual(self.run_refresh(repo, return_value=done), 0)
+        c = self.cache(repo)
+        self.assertEqual(c["status"], "checked")
+        self.assertEqual(c["findings"], [{"target": "https://notion.so/x", "error_class": "no-access"}])
+        self.assertEqual(c["page_sha256"], hashlib.sha256((repo / "where-truth-lives.md").read_bytes()).hexdigest())
+
+    def test_exit_two_writes_skipped(self):
+        repo = make_repo()
+        done = subprocess.CompletedProcess([], 2, stdout="", stderr="gh not logged in")
+        self.run_refresh(repo, return_value=done)
+        c = self.cache(repo)
+        self.assertTrue(c["status"].startswith("skipped"))
+        self.assertEqual(c["findings"], [])
+
+    def test_a_skipped_run_keeps_the_last_findings_and_their_day(self):
+        repo = make_repo()
+        out = json.dumps({"findings": [{"target": "https://notion.so/x", "error_class": "no-access"}]})
+        self.run_refresh(repo, return_value=subprocess.CompletedProcess([], 1, stdout=out, stderr=""))
+        first = self.cache(repo)
+        first["checked_at"] = first["findings_checked_at"] = "2026-10-01T09:00:00Z"
+        (repo / ".git" / "scripta-link-check.json").write_text(json.dumps(first))
+        self.run_refresh(repo, return_value=subprocess.CompletedProcess([], 2, stdout="", stderr="offline"))
+        c = self.cache(repo)
+        self.assertTrue(c["status"].startswith("skipped"))
+        self.assertNotEqual(c["checked_at"], "2026-10-01T09:00:00Z")
+        self.assertEqual(c["findings"], first["findings"])
+        self.assertEqual(c["findings_checked_at"], "2026-10-01T09:00:00Z")
+
+    def test_timeout_writes_skipped(self):
+        repo = make_repo()
+        self.run_refresh(repo, side_effect=subprocess.TimeoutExpired("x", 300))
+        self.assertTrue(self.cache(repo)["status"].startswith("skipped"))
+
+    def test_command_shape(self):
+        repo = make_repo()
+        done = subprocess.CompletedProcess([], 0, stdout='{"findings": []}', stderr="")
+        with mock.patch.object(hook.subprocess, "run", return_value=done) as run:
+            hook.refresh_links(repo)
+        cmd = run.call_args[0][0]
+        self.assertEqual(cmd[2:], ["--path", str(repo), "--only", "where-truth-lives.md", "--json"])
+        self.assertEqual(run.call_args[1]["timeout"], 300)
+
+
+class MainLinkCheck(unittest.TestCase):
+    def run_main(self, repo, env=None):
+        buf = io.StringIO()
+        full = {"SCRIPTA_HANDBOOK_PATH": str(repo), "SCRIPTA_HOOK_TTL_MIN": "100000"}
+        full.update(env or {})
+        (repo / ".git" / "scripta-hook-last-pull").touch()  # no real git pull
+        with mock.patch.dict(os.environ, full), mock.patch.object(hook.subprocess, "Popen") as popen, \
+                contextlib.redirect_stdout(buf):
+            hook.main()
+        return buf.getvalue(), popen
+
+    def test_warning_is_appended_to_output(self):
+        repo = make_repo()
+        write_cache(repo, [finding("https://notion.so/x", "gone")])
+        out, popen = self.run_main(repo)
+        text = json.loads(out)["hookSpecificOutput"]["additionalContext"]
+        self.assertIn("A team handbook exists at", text)
+        self.assertIn("https://notion.so/x (gone)", text)
+        popen.assert_not_called()
+
+    def test_off_switch_reads_and_spawns_nothing(self):
+        repo = make_repo()
+        write_cache(repo, [finding("https://notion.so/x", "gone")], age_h=99)
+        out, popen = self.run_main(repo, {"SCRIPTA_LINK_CHECK": "0"})
+        self.assertNotIn("did not open", out)
+        popen.assert_not_called()
+
+    def test_invalid_hours_falls_back_to_default(self):
+        repo = make_repo()
+        write_cache(repo, [], age_h=1)
+        _, popen = self.run_main(repo, {"SCRIPTA_LINK_CHECK_HOURS": "soon"})
+        popen.assert_not_called()
+
+    def test_popen_failure_keeps_output(self):
+        repo = make_repo()
+        buf = io.StringIO()
+        (repo / ".git" / "scripta-hook-last-pull").touch()
+        env = {"SCRIPTA_HANDBOOK_PATH": str(repo), "SCRIPTA_HOOK_TTL_MIN": "100000"}
+        with mock.patch.dict(os.environ, env), \
+                mock.patch.object(hook.subprocess, "Popen", side_effect=OSError("x")), \
+                contextlib.redirect_stdout(buf):
+            hook.main()
+        self.assertIn("A team handbook exists at", buf.getvalue())
+
+    def test_refresh_flag_prints_nothing(self):
+        repo = make_repo()
+        buf = io.StringIO()
+        done = subprocess.CompletedProcess([], 0, stdout='{"findings": []}', stderr="")
+        with mock.patch.object(hook.subprocess, "run", return_value=done), \
+                mock.patch.object(sys, "argv", ["hook", "--refresh-links", str(repo)]), \
+                contextlib.redirect_stdout(buf):
+            with self.assertRaises(SystemExit) as cm:
+                exec(compile(Path(hook.__file__).read_text(), hook.__file__, "exec"),
+                     {"__name__": "__main__", "__file__": hook.__file__})
+        self.assertEqual(cm.exception.code, 0)
+        self.assertEqual(buf.getvalue(), "")
+        self.assertTrue((repo / ".git" / "scripta-link-check.json").is_file())
 
 
 if __name__ == "__main__":
