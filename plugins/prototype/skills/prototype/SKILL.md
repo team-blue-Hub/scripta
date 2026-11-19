@@ -207,7 +207,10 @@ durable URL after all, the page is one copy away from the normal flow.
 After publishing, "change the button", "make it dark" → edit the SAME folder in
 the clone (new PR or push to the open one), not the old preview folder, which
 is no longer the copy to edit; the URL stays stable. Preview the edit from the
-clone before pushing it, as in Step 3. A build-in-place page is edited in
+clone before pushing it, as in Step 3. If the edit changes the page's
+`<title>` and the folder's `README.md` heading is still the old title, change
+the heading to the new one; a `README.md` with any other heading is a
+teammate's note, so leave it. A build-in-place page is edited in
 place the same way, at the path it already has. A genuinely different idea
 gets a new folder. Never edit someone else's folder unless the user
 explicitly asks.
